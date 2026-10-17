@@ -33,29 +33,64 @@ The first build takes several minutes (it compiles the geometry kernel). Later b
 
 ## Using it
 
+### Mouse
+
 | Action | How |
 |---|---|
 | Add a shape | Click it in the library (adds at the view centre) or drag it onto the workplane |
 | Select | Click; Shift+click to add/remove; drag on empty space for a box selection |
-| Move | Drag the object. Arrow keys nudge (Shift = x10), Ctrl+Up/Down lifts |
-| Resize | White corner squares (X+Y, Shift = uniform), black side squares (one axis), top square (height) |
+| Move | Drag the object. Alt+drag moves a copy |
+| Resize | White corner squares (X+Y), black side squares (one axis), top square (height). Shift = uniform, Alt = about the centre |
 | Raise / lower | Drag the black cone above the object |
-| Rotate | Drag a curved arrow. Snaps 22.5 deg; Shift = 45 deg, Ctrl = 1 deg |
-| Orbit / pan / zoom | Right-drag / middle-drag or Shift+right-drag / wheel (zooms towards the cursor) |
-| Solid / Hole | Inspector buttons, or S / H |
-| Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
-| Duplicate / Copy / Paste | Ctrl+D / Ctrl+C / Ctrl+V |
-| Undo / Redo | Ctrl+Z / Ctrl+Y |
+| Rotate | Drag a curved arrow. Snaps 22.5 deg; Shift = 45 deg, Ctrl = 1 deg; Alt rotates a copy |
+| Orbit | Right-drag, or Ctrl+Left-drag |
+| Pan | Middle-drag, Shift+Right-drag, or Ctrl+Shift+Left-drag |
+| Zoom | Wheel (towards the cursor), or + / - |
+
+### Keys
+
+| | |
+|---|---|
+| Union group / Bundle group / Intersect group | Ctrl+G / Ctrl+B / Ctrl+I |
+| Ungroup | Ctrl+Shift+G |
+| Hole / Solid | H / S |
+| Lock or unlock | Ctrl+L |
+| Hide selected / Show all | Ctrl+H / Ctrl+Shift+H |
+| Align / Mirror / Measure | L / M / R |
 | Drop to workplane | D |
 | Fit view | F |
-| Save / Save As / Open / New | Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N |
-| Export STL | Ctrl+E (exports the selection, or everything if nothing is selected; holes are never exported) |
+| Nudge (1 grid step, Shift = x10) / Raise and lower | Arrows / Ctrl+Up, Ctrl+Down |
+| Duplicate / Copy / Cut / Paste / Delete | Ctrl+D / Ctrl+C / Ctrl+X / Ctrl+V / Del |
+| Select all | Ctrl+A |
+| Undo / Redo | Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z |
+| New / Open / Save / Save As | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
+| Export | Ctrl+E |
+| Leave a tool, or clear the selection | Esc |
 
-The snap grid is set at the bottom right.
+### Group types
+
+- **Union**: solids merge, holes cut. The classic Tinkercad group.
+- **Bundle**: parts stay together but keep their own colours, and holes don't cut.
+- **Intersect**: only the volume shared by all the solids is kept.
+
+Select a group to switch its type in the inspector. Every group can be ungrouped again.
+
+### Tools
+
+- **Align (L)**: with two or more objects selected, click a dot to line them up by their minimum, centre or maximum on that axis. Click one of the selected objects first to align the others to it.
+- **Mirror (M)**: click an arrow to flip the selection along that axis.
+- **Measure (R)**: hover to see what will be picked. Click an edge, circle or flat face, then a second one. A single circle shows its radius and diameter. Two picks give the distance between them, e.g. the gap between two parallel edges of a notch, centre to centre of two holes, or face to face. It works on the finished shape, so nothing needs ungrouping.
+
+### Import and export
+
+- **Import**: STL, OBJ or 3MF. A multi-part 3MF comes in as a bundle of parts with their colours. Imported meshes are stored inside the `.orion3d` file. A mesh that isn't watertight can still be moved and exported, but holes won't cut it.
+- **Export**: STL (single colour, for printing), 3MF (separate coloured parts, for multi-colour printing) or OBJ (with colours). You can export everything or just the selection. Holes and hidden objects are never exported.
 
 ### Shapes
 
-Box (with rounded edges via Radius), Cylinder, Sphere, Half Sphere, Cone, Pyramid, Roof, Wedge, Tube, Torus, Polygon, and **MetaFillet**: a recreation of the retired Tinkercad shape generator, with Radius, Height and Type (Fillet or Chamfer).
+Box Hole and Cylinder Hole, then Box (with rounded edges via Radius), Cylinder, Sphere, MetaFillet, Half Sphere, Cone, Pyramid, Roof, Wedge, Tube, Torus and Polygon.
+
+**MetaFillet** recreates the retired Tinkercad shape generator, with Radius, Height and Type (Fillet or Chamfer).
 
 Resizing a shape updates its own parameters where possible, so a rounded box keeps round corners and a MetaFillet keeps a true radius when stretched.
 
@@ -63,16 +98,18 @@ Resizing a shape updates its own parameters where possible, so a rounded box kee
 
 A zip archive containing `design.json`: the complete design as a tree.
 
-- Each **node** has an `id`, `name`, `hole` flag, `color`, a 4x4 `transform` (column-major, millimetres) and `content`.
-- `content` is either a `shape` (type plus its parameters) or a `group` (a list of child nodes).
+- Each **node** has an `id`, `name`, `hole` flag, `color`, a 4x4 `transform` (column-major, millimetres), optional `locked` / `hidden` flags, and `content`.
+- `content` is one of:
+  - a `shape`: its type plus parameters;
+  - a `group`: its `op` (`union`, `bundle` or `intersect`) plus its `children`;
+  - a `mesh`: an imported mesh, whose triangles are stored as `meshes/<id>.bin` in the same archive.
 - Groups store their children, never a merged mesh. The merged result (solids united, then holes subtracted) is recomputed on load, so ungrouping always works, at any depth.
 
 The JSON is human-readable and diff-friendly. Files carry a format version; newer files are refused by older builds instead of being misread.
 
 ## Roadmap
 
-- Align tool, ruler, workplane tool
-- Multicolour groups
-- STL / OBJ / 3MF import, 3MF export
+- Workplane tool and ruler
+- Multicolour unions
 - Text and more shapes
 - Windows installer with `.orion3d` file association

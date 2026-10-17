@@ -1,6 +1,7 @@
 struct Globals {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,
+    // xyz: key light direction, w: fine grid fade distance
     light_dir: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -11,8 +12,14 @@ struct Obj {
     color: vec4<f32>,
     // x: hole, y: selected, z: hovered, w: unlit
     flags: vec4<f32>,
+    // x: object id for the outline pass
+    ids: vec4<u32>,
 };
 @group(1) @binding(0) var<uniform> o: Obj;
+
+// ---------------------------------------------------------------------------
+// Shaded meshes
+// ---------------------------------------------------------------------------
 
 struct MeshIn {
     @location(0) pos: vec3<f32>,
@@ -56,22 +63,55 @@ fn fs_mesh(i: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     if (o.flags.x > 0.5) {
         // Holes: translucent grey with diagonal stripes, like Tinkercad.
         let s = fract((i.clip.x + i.clip.y) / 16.0);
-        let grey = select(0.62, 0.78, s < 0.5);
+        let grey = select(0.62, 0.80, s < 0.5);
         base = vec3<f32>(grey, grey, grey);
-        alpha = 0.45;
+        alpha = 0.5;
     }
     var col = base * light;
-    let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.12;
+    let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.10;
     col = col + vec3<f32>(spec, spec, spec);
-
-    let rim = pow(1.0 - head, 4.0);
-    if (o.flags.y > 0.5) {
-        col = mix(col, vec3<f32>(0.25, 0.60, 1.0), clamp(rim * 0.5, 0.0, 0.35));
-    } else if (o.flags.z > 0.5) {
-        col = col * 1.12 + vec3<f32>(0.03, 0.04, 0.06);
+    if (o.flags.z > 0.5 && o.flags.y < 0.5) {
+        col = col * 1.10 + vec3<f32>(0.02, 0.03, 0.05);
     }
     return vec4<f32>(col, alpha);
 }
+
+// ---------------------------------------------------------------------------
+// Object id pass (for silhouettes and the selection outline)
+// ---------------------------------------------------------------------------
+
+@vertex
+fn vs_id(v: MeshIn) -> @builtin(position) vec4<f32> {
+    return g.view_proj * (o.model * vec4<f32>(v.pos, 1.0));
+}
+
+@fragment
+fn fs_id() -> @location(0) u32 {
+    return o.ids.x;
+}
+
+// ---------------------------------------------------------------------------
+// Hard edges of objects (dark lines, pulled slightly towards the camera)
+// ---------------------------------------------------------------------------
+
+@vertex
+fn vs_edge(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+    var c = g.view_proj * (o.model * vec4<f32>(pos, 1.0));
+    c.z = c.z - 0.00004 * c.w;
+    return c;
+}
+
+@fragment
+fn fs_edge() -> @location(0) vec4<f32> {
+    if (o.flags.x > 0.5) {
+        return vec4<f32>(0.35, 0.37, 0.40, 0.55);
+    }
+    return vec4<f32>(o.color.rgb * 0.12 + vec3<f32>(0.02, 0.025, 0.03), 0.9);
+}
+
+// ---------------------------------------------------------------------------
+// Lines (grid)
+// ---------------------------------------------------------------------------
 
 struct LineIn {
     @location(0) pos: vec3<f32>,
@@ -96,8 +136,7 @@ fn vs_line(v: LineIn) -> LineOut {
 @fragment
 fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     // Fade grid lines with distance so they never turn into moire.
-    // light_dir.w holds the fade distance for fine lines; coarse lines
-    // (alpha >= 0.5) fade much further out.
+    // Coarse lines (alpha >= 0.5) fade much further out.
     let d = distance(g.cam_pos.xyz, i.world);
     var fade_at = g.light_dir.w;
     if (i.color.a >= 0.5) {
@@ -105,4 +144,73 @@ fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     }
     let k = clamp(1.0 - (d - fade_at) / (fade_at * 0.6), 0.0, 1.0);
     return vec4<f32>(i.color.rgb, i.color.a * k);
+}
+
+// ---------------------------------------------------------------------------
+// Outline composite (full screen)
+// ---------------------------------------------------------------------------
+
+struct OutlineParams {
+    dark: vec4<f32>,
+    select: vec4<f32>,
+    hover: vec4<f32>,
+    // x: selection outline radius (px), y: any selected (0/1)
+    misc: vec4<f32>,
+};
+@group(0) @binding(0) var idtex: texture_2d<u32>;
+@group(0) @binding(1) var<uniform> op: OutlineParams;
+
+const SEL: u32 = 0x80000000u;
+const HOV: u32 = 0x40000000u;
+const MASK: u32 = 0x3fffffffu;
+
+@vertex
+fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    return vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+}
+
+fn id_at(p: vec2<i32>) -> u32 {
+    let dim = vec2<i32>(textureDimensions(idtex));
+    let q = clamp(p, vec2<i32>(0, 0), dim - vec2<i32>(1, 1));
+    return textureLoad(idtex, q, 0).x;
+}
+
+@fragment
+fn fs_outline(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let c = vec2<i32>(pos.xy);
+    let id = id_at(c);
+    let low = id & MASK;
+
+    // Selection glow outside selected objects.
+    if ((id & SEL) == 0u && op.misc.y > 0.5) {
+        let r = i32(op.misc.x);
+        var best = 1e9;
+        for (var dy = -r; dy <= r; dy = dy + 1) {
+            for (var dx = -r; dx <= r; dx = dx + 1) {
+                if ((id_at(c + vec2<i32>(dx, dy)) & SEL) != 0u) {
+                    best = min(best, f32(dx * dx + dy * dy));
+                }
+            }
+        }
+        if (best <= op.misc.x * op.misc.x + 0.5) {
+            return op.select;
+        }
+    }
+
+    // Thin dark silhouette where object ids change.
+    if (low != 0u) {
+        let n = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
+        for (var k = 0; k < 4; k = k + 1) {
+            let nid = id_at(c + n[k]);
+            if ((nid & MASK) != low) {
+                if ((id & HOV) != 0u) {
+                    return op.hover;
+                }
+                return op.dark;
+            }
+        }
+    }
+    discard;
 }

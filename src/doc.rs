@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserialize as De, Deserializer, Serialize, Serializer}
 pub type NodeId = u64;
 
 pub const FORMAT_NAME: &str = "orion3d";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Transform
@@ -153,20 +153,22 @@ pub enum Shape {
     MetaFillet { radius: f64, height: f64, kind: FilletKind, segments: u32 },
 }
 
-/// Library entries in display order.
-pub const LIBRARY: [ShapeKind; 12] = [
-    ShapeKind::Box,
-    ShapeKind::Cylinder,
-    ShapeKind::Sphere,
-    ShapeKind::HalfSphere,
-    ShapeKind::Cone,
-    ShapeKind::Pyramid,
-    ShapeKind::Roof,
-    ShapeKind::Wedge,
-    ShapeKind::Tube,
-    ShapeKind::Torus,
-    ShapeKind::Polygon,
-    ShapeKind::MetaFillet,
+/// Library entries in display order: (shape, added as a hole).
+pub const LIBRARY: [(ShapeKind, bool); 14] = [
+    (ShapeKind::Box, true),
+    (ShapeKind::Cylinder, true),
+    (ShapeKind::Box, false),
+    (ShapeKind::Cylinder, false),
+    (ShapeKind::Sphere, false),
+    (ShapeKind::MetaFillet, false),
+    (ShapeKind::HalfSphere, false),
+    (ShapeKind::Cone, false),
+    (ShapeKind::Pyramid, false),
+    (ShapeKind::Roof, false),
+    (ShapeKind::Wedge, false),
+    (ShapeKind::Tube, false),
+    (ShapeKind::Torus, false),
+    (ShapeKind::Polygon, false),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -266,11 +268,177 @@ impl Shape {
 // Nodes
 // ---------------------------------------------------------------------------
 
+/// How a group combines its children (Tinkercad's group types).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupOp {
+    /// Kept together but not merged: parts keep their own colours and
+    /// holes don't cut.
+    Bundle,
+    /// Solids merged, holes cut (the classic Tinkercad group).
+    #[default]
+    Union,
+    /// Only the volume shared by all solids is kept; holes then cut.
+    Intersect,
+}
+
+impl GroupOp {
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupOp::Bundle => "Bundle",
+            GroupOp::Union => "Union",
+            GroupOp::Intersect => "Intersect",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Group {
+    pub op: GroupOp,
+    pub children: Vec<Node>,
+}
+
+impl<'de> De<'de> for Group {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Early files stored a group as a bare list of children.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            List(Vec<Node>),
+            Full {
+                #[serde(default)]
+                op: GroupOp,
+                children: Vec<Node>,
+            },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::List(children) => Group { op: GroupOp::Union, children },
+            Repr::Full { op, children } => Group { op, children },
+        })
+    }
+}
+
+/// An imported triangle mesh. The triangles live in the .orion3d archive
+/// as `meshes/<id>.bin`; design.json only references them.
+#[derive(Clone, Debug)]
+pub struct MeshData {
+    pub id: String,
+    pub positions: std::sync::Arc<Vec<[f32; 3]>>,
+    pub indices: std::sync::Arc<Vec<u32>>,
+}
+
+impl PartialEq for MeshData {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl MeshData {
+    pub fn new(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in &positions {
+            for c in p {
+                c.to_bits().hash(&mut h);
+            }
+        }
+        indices.hash(&mut h);
+        MeshData {
+            id: format!("{:016x}", h.finish()),
+            positions: std::sync::Arc::new(positions),
+            indices: std::sync::Arc::new(indices),
+        }
+    }
+
+    pub fn file_name(&self) -> String {
+        format!("meshes/{}.bin", self.id)
+    }
+
+    /// Little-endian: vertex count, triangle count, positions, indices.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + self.positions.len() * 12 + self.indices.len() * 4);
+        out.extend_from_slice(&(self.positions.len() as u32).to_le_bytes());
+        out.extend_from_slice(&((self.indices.len() / 3) as u32).to_le_bytes());
+        for p in self.positions.iter() {
+            for c in p {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        for i in self.indices.iter() {
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn fill_from_bytes(&mut self, b: &[u8]) -> Result<(), String> {
+        let rd = |o: usize| -> Result<u32, String> {
+            b.get(o..o + 4)
+                .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+                .ok_or_else(|| "mesh data truncated".to_string())
+        };
+        let nv = rd(0)? as usize;
+        let nt = rd(4)? as usize;
+        if b.len() != 8 + nv * 12 + nt * 12 {
+            return Err("mesh data has the wrong size".into());
+        }
+        let mut pos = Vec::with_capacity(nv);
+        for i in 0..nv {
+            let o = 8 + i * 12;
+            pos.push([
+                f32::from_bits(rd(o)?),
+                f32::from_bits(rd(o + 4)?),
+                f32::from_bits(rd(o + 8)?),
+            ]);
+        }
+        let mut idx = Vec::with_capacity(nt * 3);
+        let base = 8 + nv * 12;
+        for i in 0..nt * 3 {
+            let v = rd(base + i * 4)?;
+            if v as usize >= nv {
+                return Err("mesh index out of range".into());
+            }
+            idx.push(v);
+        }
+        self.positions = std::sync::Arc::new(pos);
+        self.indices = std::sync::Arc::new(idx);
+        Ok(())
+    }
+}
+
+impl Serialize for MeshData {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Repr<'a> {
+            id: &'a str,
+            vertices: usize,
+            triangles: usize,
+        }
+        Repr { id: &self.id, vertices: self.positions.len(), triangles: self.indices.len() / 3 }.serialize(s)
+    }
+}
+
+impl<'de> De<'de> for MeshData {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Repr {
+            id: String,
+        }
+        let r = Repr::deserialize(d)?;
+        // Triangles are filled in from the archive by file::load.
+        Ok(MeshData { id: r.id, positions: Default::default(), indices: Default::default() })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Content {
     Shape(Shape),
-    Group(Vec<Node>),
+    Group(Group),
+    Mesh(MeshData),
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -281,6 +449,10 @@ pub struct Node {
     pub hole: bool,
     pub color: Rgb,
     pub transform: Xform,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
     pub content: Content,
 }
 
@@ -292,8 +464,8 @@ impl Node {
     /// Visit this node and every descendant.
     pub fn walk(&self, f: &mut impl FnMut(&Node)) {
         f(self);
-        if let Content::Group(ch) = &self.content {
-            for c in ch {
+        if let Content::Group(g) = &self.content {
+            for c in &g.children {
                 c.walk(f);
             }
         }
@@ -301,8 +473,8 @@ impl Node {
 
     pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut Node)) {
         f(self);
-        if let Content::Group(ch) = &mut self.content {
-            for c in ch {
+        if let Content::Group(g) = &mut self.content {
+            for c in &mut g.children {
                 c.walk_mut(f);
             }
         }
@@ -397,14 +569,29 @@ impl Document {
             hole: false,
             color: kind.default_color(),
             transform: Xform::translation(at),
+            locked: false,
+            hidden: false,
             content: Content::Shape(kind.default_shape()),
+        }
+    }
+
+    pub fn new_mesh(&mut self, name: &str, mesh: MeshData, at: DVec3) -> Node {
+        Node {
+            id: self.alloc_id(),
+            name: name.to_string(),
+            hole: false,
+            color: PALETTE[5],
+            transform: Xform::translation(at),
+            locked: false,
+            hidden: false,
+            content: Content::Mesh(mesh),
         }
     }
 
     /// Group the given top-level nodes. Returns the new group's id.
     /// Children keep their transforms; the group starts at identity, so
     /// nothing moves.
-    pub fn group(&mut self, ids: &[NodeId]) -> Option<NodeId> {
+    pub fn group(&mut self, ids: &[NodeId], op: GroupOp) -> Option<NodeId> {
         if ids.len() < 2 {
             return None;
         }
@@ -428,11 +615,13 @@ impl Document {
         let id = self.alloc_id();
         let group = Node {
             id,
-            name: "Group".into(),
+            name: op.label().into(),
             hole: all_holes,
             color,
             transform: Xform::default(),
-            content: Content::Group(children),
+            locked: false,
+            hidden: false,
+            content: Content::Group(Group { op, children }),
         };
         let pos = first_pos.min(self.nodes.len());
         self.nodes.insert(pos, group);
@@ -447,7 +636,7 @@ impl Document {
             return vec![];
         }
         let group = self.nodes.remove(idx);
-        let Content::Group(children) = group.content else { unreachable!() };
+        let Content::Group(Group { children, .. }) = group.content else { unreachable!() };
         let mut out = Vec::new();
         // Children keep their own solid/hole state, so ungrouping always
         // gets back exactly the parts that went in.

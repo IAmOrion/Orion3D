@@ -4,20 +4,34 @@ use crate::doc::{Content, Document, Node, NodeId, Shape, Xform};
 use crate::geom::{GeomCache, world_bounds};
 use glam::{DMat3, DMat4, DVec3};
 
+fn merge(a: Option<(DVec3, DVec3)>, b: Option<(DVec3, DVec3)>) -> Option<(DVec3, DVec3)> {
+    match (a, b) {
+        (Some((a0, a1)), Some((b0, b1))) => Some((a0.min(b0), a1.max(b1))),
+        (x, None) | (None, x) => x,
+    }
+}
+
+/// World bounds of a top-level node (all its parts, holes included).
+pub fn node_bounds_opt(cache: &mut GeomCache, node: &Node) -> Option<(DVec3, DVec3)> {
+    let mut out = None;
+    for it in cache.items_of(node) {
+        out = merge(out, world_bounds(&it.mesh, &it.model));
+    }
+    out
+}
+
 pub fn node_bounds(cache: &mut GeomCache, node: &Node) -> (DVec3, DVec3) {
-    let (_, mesh) = cache.content_mesh(&node.content);
-    world_bounds(&mesh, &node.transform.0)
+    node_bounds_opt(cache, node).unwrap_or_else(|| {
+        let o = node.transform.0.transform_point3(DVec3::ZERO);
+        (o, o)
+    })
 }
 
 pub fn bounds_of(cache: &mut GeomCache, doc: &Document, ids: &[NodeId]) -> Option<(DVec3, DVec3)> {
-    let mut out: Option<(DVec3, DVec3)> = None;
+    let mut out = None;
     for id in ids {
         if let Some(n) = doc.get(*id) {
-            let (lo, hi) = node_bounds(cache, n);
-            out = Some(match out {
-                None => (lo, hi),
-                Some((a, b)) => (a.min(lo), b.max(hi)),
-            });
+            out = merge(out, node_bounds_opt(cache, n));
         }
     }
     out
