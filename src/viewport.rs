@@ -291,13 +291,24 @@ impl OrionApp {
                 }
             }
             Tool::Align { .. } => {
+                // Like Tinkercad: for each axis three short lines leave the
+                // reference box at its min / middle / max, each ending in a dot.
+                // X on the front edge, Y on the left edge, Z up the right-front corner.
+                let l = g * 1.5;
                 for k in 0..3 {
                     let x = [lo.x, c.x, hi.x][k];
-                    add(HandleKind::AlignDot(0, k), DVec3::new(x, lo.y - g * 1.6, lo.z));
                     let y = [lo.y, c.y, hi.y][k];
-                    add(HandleKind::AlignDot(1, k), DVec3::new(hi.x + g * 1.6, y, lo.z));
                     let z = [lo.z, c.z, hi.z][k];
-                    add(HandleKind::AlignDot(2, k), DVec3::new(lo.x - g * 1.2, lo.y - g * 1.2, z));
+                    let lines = [
+                        (0, DVec3::new(x, lo.y, lo.z), DVec3::new(x, lo.y - l, lo.z)),
+                        (1, DVec3::new(lo.x, y, lo.z), DVec3::new(lo.x - l, y, lo.z)),
+                        (2, DVec3::new(hi.x, lo.y, z), DVec3::new(hi.x + l, lo.y, z)),
+                    ];
+                    for (axis, a, b) in lines {
+                        if let (Some(pa), Some(pb)) = (self.project(v, a), self.project(v, b)) {
+                            out.push(Handle { kind: HandleKind::AlignDot(axis, k), pos: pb, arc: vec![pa, pb] });
+                        }
+                    }
                 }
             }
             Tool::Mirror => {
@@ -352,7 +363,7 @@ impl OrionApp {
 
         let mut items = self.visible_items();
         let mut bounds = ops::bounds_of(&mut self.cache, &self.doc, &self.selection);
-        let mut handles = bounds.map(|(lo, hi)| self.compute_handles(&v, lo, hi)).unwrap_or_default();
+        let mut handles = self.handle_bounds(bounds).map(|(lo, hi)| self.compute_handles(&v, lo, hi)).unwrap_or_default();
 
         // ------------------------------------------------------------------
         // Input
@@ -417,7 +428,7 @@ impl OrionApp {
         if self.drag.is_some() || pressed || released {
             items = self.visible_items();
             bounds = ops::bounds_of(&mut self.cache, &self.doc, &self.selection);
-            handles = bounds.map(|(lo, hi)| self.compute_handles(&v, lo, hi)).unwrap_or_default();
+            handles = self.handle_bounds(bounds).map(|(lo, hi)| self.compute_handles(&v, lo, hi)).unwrap_or_default();
         }
 
         // Hover.
@@ -436,7 +447,11 @@ impl OrionApp {
         // ------------------------------------------------------------------
         // Render
         // ------------------------------------------------------------------
-        self.render_scene(ui, frame, rect, &items, bounds);
+        let ghosts = match (&self.tool, hovered_handle) {
+            (Tool::Align { .. }, Some(HandleKind::AlignDot(axis, which))) => self.align_preview(axis, which),
+            _ => Vec::new(),
+        };
+        self.render_scene(ui, frame, rect, &items, &ghosts, bounds);
 
         // ------------------------------------------------------------------
         // Overlays
@@ -453,7 +468,13 @@ impl OrionApp {
                 }
             }
             if let Tool::Align { .. } = self.tool {
-                self.draw_align_guides(&painter, &v, lo, hi, hovered_handle);
+                let sel = Some((lo, hi));
+                if let Some((rlo, rhi)) = self.handle_bounds(sel) {
+                    self.draw_align_guides(&painter, &v, rlo, rhi);
+                }
+                for h in &handles {
+                    draw_handle(&painter, h, hovered_handle == Some(h.kind));
+                }
             }
             self.draw_drag_feedback(&painter, &v, lo, hi);
         }
@@ -824,16 +845,22 @@ impl OrionApp {
         }
     }
 
-    /// Align every selected object on `axis` to min / centre / max of the
-    /// selection (or of the key object).
-    pub fn align(&mut self, axis: usize, which: usize) {
+    /// The box the align handles sit on: the pinned shape if there is one,
+    /// otherwise the whole selection.
+    fn handle_bounds(&mut self, sel: Option<(DVec3, DVec3)>) -> Option<(DVec3, DVec3)> {
+        match self.tool {
+            Tool::Align { key: Some(k) } => ops::bounds_of(&mut self.cache, &self.doc, &[k]).or(sel),
+            _ => sel,
+        }
+    }
+
+    /// How far each selected (unpinned, unlocked) object moves for an align.
+    fn align_deltas(&mut self, axis: usize, which: usize) -> Vec<(NodeId, DVec3)> {
         let key = if let Tool::Align { key } = self.tool { key } else { None };
-        let reference = match key {
-            Some(k) => ops::bounds_of(&mut self.cache, &self.doc, &[k]),
-            None => ops::bounds_of(&mut self.cache, &self.doc, &self.selection),
-        };
-        let Some((rlo, rhi)) = reference else { return };
+        let sel = ops::bounds_of(&mut self.cache, &self.doc, &self.selection);
+        let Some((rlo, rhi)) = self.handle_bounds(sel) else { return Vec::new() };
         let target = [rlo[axis], (rlo[axis] + rhi[axis]) * 0.5, rhi[axis]][which];
+        let mut out = Vec::new();
         for id in self.selection.clone() {
             if Some(id) == key {
                 continue;
@@ -846,63 +873,72 @@ impl OrionApp {
             let cur = [lo[axis], (lo[axis] + hi[axis]) * 0.5, hi[axis]][which];
             let mut d = DVec3::ZERO;
             d[axis] = target - cur;
+            if d[axis].abs() > 1e-9 {
+                out.push((id, d));
+            }
+        }
+        out
+    }
+
+    /// Align every selected object on `axis` to min / centre / max of the
+    /// selection, or of the pinned shape.
+    pub fn align(&mut self, axis: usize, which: usize) {
+        for (id, d) in self.align_deltas(axis, which) {
             if let Some(n) = self.doc.get_mut(id) {
                 n.transform.0 = DMat4::from_translation(d) * n.transform.0;
             }
         }
     }
 
-    fn draw_align_guides(&self, p: &egui::Painter, v: &View, lo: DVec3, hi: DVec3, hot: Option<HandleKind>) {
-        let g = self.handle_gap();
-        let c = (lo + hi) * 0.5;
-        let stroke = Stroke::new(1.0, Color32::from_gray(120));
-        let line = |a: DVec3, b: DVec3| {
-            if let (Some(pa), Some(pb)) = (self.project(v, a), self.project(v, b)) {
-                p.extend(egui::Shape::dashed_line(&[pa, pb], stroke, 4.0, 3.0));
-            }
-        };
-        line(DVec3::new(lo.x, lo.y - g * 1.6, lo.z), DVec3::new(hi.x, lo.y - g * 1.6, lo.z));
-        line(DVec3::new(hi.x + g * 1.6, lo.y, lo.z), DVec3::new(hi.x + g * 1.6, hi.y, lo.z));
-        line(DVec3::new(lo.x - g * 1.2, lo.y - g * 1.2, lo.z), DVec3::new(lo.x - g * 1.2, lo.y - g * 1.2, hi.z));
-        // Preview of the alignment plane for the hovered dot.
-        if let Some(HandleKind::AlignDot(axis, which)) = hot {
-            let val = [lo[axis], c[axis], hi[axis]][which];
-            let (_, u, w) = axis_basis(axis);
-            let mut q = c;
-            q[axis] = val;
-            let e = (hi - lo) * 0.5 + DVec3::splat(g * 0.5);
-            let corners: Vec<Pos2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)]
-                .iter()
-                .filter_map(|(a, b)| self.project(v, q + u * a * e.dot(u).abs() + w * b * e.dot(w).abs()))
-                .collect();
-            if corners.len() == 5 {
-                p.add(egui::Shape::line(corners, Stroke::new(1.5, ACCENT)));
+    /// Ghosts of the objects where they would end up.
+    fn align_preview(&mut self, axis: usize, which: usize) -> Vec<Item> {
+        let mut out = Vec::new();
+        for (id, d) in self.align_deltas(axis, which) {
+            let Some(n) = self.doc.get(id).cloned() else { continue };
+            for mut it in self.cache.items_of(&n) {
+                it.model = DMat4::from_translation(d) * it.model;
+                out.push(it);
             }
         }
-        if let Tool::Align { key: Some(k) } = self.tool {
-            if let Some(n) = self.doc.get(k) {
-                let _ = n;
-                if let Some(pos) = self.project(v, DVec3::new(c.x, c.y, hi.z)) {
-                    p.text(pos + vec2(0.0, -30.0), Align2::CENTER_BOTTOM, "aligning to the highlighted object", FontId::proportional(12.0), Color32::from_gray(80));
-                }
+        out
+    }
+
+    fn draw_align_guides(&self, p: &egui::Painter, v: &View, lo: DVec3, hi: DVec3) {
+        let c = (lo + hi) * 0.5;
+        let stroke = Stroke::new(1.2, Color32::from_gray(60));
+        let line = |a: DVec3, b: DVec3| {
+            if let (Some(pa), Some(pb)) = (self.project(v, a), self.project(v, b)) {
+                p.line_segment([pa, pb], stroke);
             }
+        };
+        line(DVec3::new(c.x, lo.y, lo.z), DVec3::new(c.x, hi.y, lo.z));
+        line(DVec3::new(lo.x, c.y, lo.z), DVec3::new(hi.x, c.y, lo.z));
+        line(DVec3::new(hi.x, lo.y, lo.z), DVec3::new(hi.x, lo.y, hi.z));
+        if matches!(self.tool, Tool::Align { key: Some(_) }) {
+            // Outline the pinned shape's footprint.
+            let foot: Vec<Pos2> = [(lo.x, lo.y), (hi.x, lo.y), (hi.x, hi.y), (lo.x, hi.y), (lo.x, lo.y)]
+                .iter()
+                .filter_map(|(x, y)| self.project(v, DVec3::new(*x, *y, lo.z)))
+                .collect();
+            p.extend(egui::Shape::dashed_line(&foot, Stroke::new(1.2, Color32::from_gray(40)), 5.0, 4.0));
         }
     }
 
     fn tool_banner(&self, ui: &mut egui::Ui, rect: Rect) {
         let text = match &self.tool {
             Tool::Select => return,
-            Tool::Align { key: None } => "Align: click a dot. Click one of the selected objects first to align the others to it. Esc to finish.",
-            Tool::Align { key: Some(_) } => "Align: aligning to the chosen object. Click a dot. Esc to finish.",
+            Tool::Align { key: None } => "Click handles to align shapes front, middle, back. Click a selected shape to pin it in place",
+            Tool::Align { key: Some(_) } => "Shapes align to the pinned shape. Click it again to unpin. Esc to finish",
             Tool::Mirror => "Mirror: click an arrow to flip the selection along that axis. Esc to finish.",
             Tool::Measure => "Measure: click an edge, circle or face, then a second one. Right-drag to orbit. Esc to finish.",
         };
         let p = ui.painter_at(rect);
-        let font = FontId::proportional(13.0);
-        let galley = p.layout_no_wrap(text.to_string(), font, Color32::WHITE);
-        let r = Rect::from_center_size(rect.center_bottom() - vec2(0.0, 26.0), galley.size() + vec2(20.0, 10.0));
-        p.rect_filled(r, 6.0, Color32::from_rgba_unmultiplied(30, 42, 58, 230));
-        p.galley(r.min + vec2(10.0, 5.0), galley, Color32::WHITE);
+        let font = FontId::proportional(15.0);
+        let galley = p.layout_no_wrap(text.to_string(), font, Color32::from_rgb(0x2e, 0x3a, 0x4a));
+        let r = Rect::from_min_size(rect.left_top() + vec2(70.0, 12.0), galley.size() + vec2(36.0, 16.0));
+        p.rect_filled(r, r.height() * 0.5, Color32::WHITE);
+        p.rect_stroke(r, r.height() * 0.5, Stroke::new(2.0, Color32::from_gray(225)), egui::StrokeKind::Inside);
+        p.galley(r.min + vec2(18.0, 8.0), galley, Color32::from_rgb(0x2e, 0x3a, 0x4a));
     }
 
     // ----------------------------------------------------------------------
@@ -1084,6 +1120,7 @@ impl OrionApp {
         frame: &mut eframe::Frame,
         rect: Rect,
         items: &[Item],
+        ghosts: &[Item],
         bounds: Option<(DVec3, DVec3)>,
     ) {
         let Some(rs) = frame.wgpu_render_state() else { return };
@@ -1095,7 +1132,7 @@ impl OrionApp {
 
         // One outline group per top-level node.
         let mut groups: HashMap<NodeId, u32> = HashMap::new();
-        let draw: Vec<DrawItem> = items
+        let mut draw: Vec<DrawItem> = items
             .iter()
             .map(|it| {
                 let n = groups.len() as u32;
@@ -1110,9 +1147,24 @@ impl OrionApp {
                     selected: self.tool != Tool::Measure && self.selection.contains(&it.node),
                     hovered: self.hovered == Some(it.node),
                     group,
+                    ghost: false,
                 }
             })
             .collect();
+        for g in ghosts {
+            let c = egui::Rgba::from(Color32::from_rgb(g.color.0[0], g.color.0[1], g.color.0[2]));
+            draw.push(DrawItem {
+                key: g.key,
+                mesh: g.mesh.clone(),
+                model: g.model.as_mat4(),
+                color: [c.r(), c.g(), c.b(), 1.0],
+                hole: false,
+                selected: false,
+                hovered: false,
+                group: 0,
+                ghost: true,
+            });
+        }
 
         let bg = egui::Rgba::from(Color32::from_rgb(0xf3, 0xf5, 0xf8));
         let aspect = rect.width() / rect.height();
@@ -1298,10 +1350,12 @@ fn draw_handle(p: &egui::Painter, h: &Handle, hot: bool) {
             let col = if hot { hot_fill } else { ARROW_GREY };
             icons::curved_double_arrow(p, &h.arc, col, if hot { 2.6 } else { 2.0 });
         }
-        HandleKind::AlignDot(_, which) => {
-            let r = if which == 1 { 6.0 } else { 5.0 };
-            p.circle_filled(h.pos, r + 1.5, Color32::WHITE);
-            p.circle_filled(h.pos, r, if hot { hot_fill } else { Color32::from_gray(35) });
+        HandleKind::AlignDot(..) => {
+            let col = if hot { Color32::from_rgb(0xd9, 0x3a, 0x2b) } else { Color32::from_gray(45) };
+            if h.arc.len() == 2 {
+                p.line_segment([h.arc[0], h.arc[1]], Stroke::new(if hot { 2.0 } else { 1.3 }, col));
+            }
+            p.circle_filled(h.pos, 7.0, col);
         }
         HandleKind::MirrorArrow(_) => {
             let col = if hot { hot_fill } else { Color32::from_gray(35) };

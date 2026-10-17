@@ -47,6 +47,7 @@ impl OrionApp {
                 selected: false,
                 hovered: false,
                 group: 0,
+                ghost: false,
             }];
             let mut target = renderer.create_target(&rs.device, [THUMB_PX, THUMB_PX]);
             let id = renderer.render(

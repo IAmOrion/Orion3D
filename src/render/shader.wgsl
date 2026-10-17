@@ -60,6 +60,11 @@ fn fs_mesh(i: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
 
     var base = o.color.rgb;
     var alpha = o.color.a;
+    if (o.flags.x > 1.5) {
+        // Ghost preview: pale, translucent version of the shape.
+        let c = mix(base * light, vec3<f32>(1.0, 1.0, 1.0), 0.45);
+        return vec4<f32>(c, 0.55);
+    }
     if (o.flags.x > 0.5) {
         // Holes: translucent grey with diagonal stripes, like Tinkercad.
         let s = fract((i.clip.x + i.clip.y) / 16.0);

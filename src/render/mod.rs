@@ -76,6 +76,8 @@ pub struct DrawItem {
     /// Items with the same group number share one silhouette (e.g. the
     /// parts of a bundle still outline separately; a union is one item).
     pub group: u32,
+    /// Translucent preview (e.g. where Align will move a shape).
+    pub ghost: bool,
 }
 
 pub struct SceneParams<'a> {
@@ -581,7 +583,12 @@ impl Renderer {
                     model: it.model.to_cols_array_2d(),
                     normal_mat: normal.to_cols_array_2d(),
                     color: it.color,
-                    flags: [it.hole as u8 as f32, it.selected as u8 as f32, it.hovered as u8 as f32, 0.0],
+                    flags: [
+                        if it.ghost { 2.0 } else { it.hole as u8 as f32 },
+                        it.selected as u8 as f32,
+                        it.hovered as u8 as f32,
+                        0.0,
+                    ],
                     ids: [id, 0, 0, 0],
                 },
             );
@@ -665,7 +672,7 @@ impl Renderer {
             // Opaque solids.
             pass.set_pipeline(&self.mesh_pipe);
             for (i, it) in scene.items.iter().enumerate() {
-                if it.hole {
+                if it.hole || it.ghost {
                     continue;
                 }
                 let m = &self.meshes[&it.key];
@@ -701,7 +708,7 @@ impl Renderer {
             // Hard edges of solids.
             pass.set_pipeline(&self.edge_pipe);
             for (i, it) in scene.items.iter().enumerate() {
-                if it.hole {
+                if it.hole || it.ghost {
                     continue;
                 }
                 let m = &self.meshes[&it.key];
@@ -720,7 +727,7 @@ impl Renderer {
                 pass.draw(0..6, 0..1);
             }
             for (i, it) in scene.items.iter().enumerate() {
-                if !it.hole {
+                if !it.hole && !it.ghost {
                     continue;
                 }
                 let m = &self.meshes[&it.key];
@@ -752,6 +759,9 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_bg, &[]);
             pass.set_pipeline(&self.id_pipe);
             for (i, it) in scene.items.iter().enumerate() {
+                if it.ghost {
+                    continue;
+                }
                 let m = &self.meshes[&it.key];
                 pass.set_bind_group(1, &self.obj_bg, &[off(i)]);
                 pass.set_vertex_buffer(0, m.buf.slice(..));

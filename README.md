@@ -77,7 +77,7 @@ Select a group to switch its type in the inspector. Every group can be ungrouped
 
 ### Tools
 
-- **Align (L)**: with two or more objects selected, click a dot to line them up by their minimum, centre or maximum on that axis. Click one of the selected objects first to align the others to it.
+- **Align (L)**: with two or more objects selected, handles appear around the selection: front / middle / back, left / middle / right, and bottom / middle / top. Hovering a handle turns it red and shows a preview of where the shapes will go; clicking applies it. Click one of the selected shapes to pin it: the handles move onto that shape, and the others align to it while it stays put. Click it again to unpin.
 - **Mirror (M)**: click an arrow to flip the selection along that axis.
 - **Measure (R)**: hover to see what will be picked. Click an edge, circle or flat face, then a second one. A single circle shows its radius and diameter. Two picks give the distance between them, e.g. the gap between two parallel edges of a notch, centre to centre of two holes, or face to face. It works on the finished shape, so nothing needs ungrouping.
 
