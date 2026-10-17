@@ -87,8 +87,10 @@ pub struct SceneParams<'a> {
     /// Workplane size; None for thumbnails.
     pub workplane: Option<[f32; 2]>,
     pub clear: [f64; 4],
-    /// Draw the 1 mm grid lines (only when zoomed in).
+    /// Draw the minor grid lines (only when zoomed in).
     pub fine_grid: bool,
+    /// Grid spacing in mm (minor, major); None hides the grid.
+    pub grid: Option<(f32, f32)>,
     /// Distance at which fine grid lines have faded out.
     pub grid_fade: f32,
     pub extra_lines: &'a [LineVertex],
@@ -155,7 +157,7 @@ impl Target {
 }
 
 struct Plane {
-    size: [f32; 2],
+    key: [f32; 4],
     quad: wgpu::Buffer,
     major: wgpu::Buffer,
     major_count: u32,
@@ -414,8 +416,9 @@ impl Renderer {
         );
     }
 
-    fn ensure_plane(&mut self, device: &wgpu::Device, size: [f32; 2]) {
-        if self.plane.as_ref().is_some_and(|p| p.size == size) {
+    fn ensure_plane(&mut self, device: &wgpu::Device, size: [f32; 2], grid: (f32, f32)) {
+        let key = [size[0], size[1], grid.0, grid.1];
+        if self.plane.as_ref().is_some_and(|p| p.key == key) {
             return;
         }
         let (hx, hy) = (size[0] * 0.5, size[1] * 0.5);
@@ -435,8 +438,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let mut major = Vec::new();
-        let mut minor = Vec::new();
+        let mut major: Vec<LineVertex> = Vec::new();
+        let mut minor: Vec<LineVertex> = Vec::new();
         let minor_c = [0.45, 0.64, 0.88, 0.28];
         let major_c = [0.30, 0.50, 0.82, 0.75];
         let border_c = [0.20, 0.40, 0.75, 1.0];
@@ -444,30 +447,37 @@ impl Renderer {
             v.push(LineVertex { pos: a, color: c });
             v.push(LineVertex { pos: b, color: c });
         };
-        let nx = size[0] as i32;
-        let ny = size[1] as i32;
-        for i in 0..=nx {
-            let x = -hx + i as f32;
-            let (dst, c) = if i == 0 || i == nx {
-                (&mut major, border_c)
-            } else if i % 10 == 0 {
-                (&mut major, major_c)
+        // Lines start at the centre so the origin is always on a line.
+        let (step, big) = (grid.0.max(0.01), grid.1.max(0.01));
+        let per = (big / step).round().max(1.0) as i64;
+        let mut push_lines = |axis: usize| {
+            let (half, other) = if axis == 0 { (hx, hy) } else { (hy, hx) };
+            let n = (half / step).floor() as i64;
+            let fine = n * 2 <= 4000;
+            for i in -n..=n {
+                let t = i as f32 * step;
+                let is_major = i % per == 0;
+                if !is_major && !fine {
+                    continue;
+                }
+                let (a, b) = if axis == 0 { ([t, -other, 0.0], [t, other, 0.0]) } else { ([-other, t, 0.0], [other, t, 0.0]) };
+                if is_major {
+                    line(&mut major, a, b, major_c);
+                } else {
+                    line(&mut minor, a, b, minor_c);
+                }
+            }
+            // Border.
+            let (a0, b0, a1, b1) = if axis == 0 {
+                ([-half, -other, 0.0], [-half, other, 0.0], [half, -other, 0.0], [half, other, 0.0])
             } else {
-                (&mut minor, minor_c)
+                ([-other, -half, 0.0], [other, -half, 0.0], [-other, half, 0.0], [other, half, 0.0])
             };
-            line(dst, [x, -hy, 0.0], [x, hy, 0.0], c);
-        }
-        for j in 0..=ny {
-            let y = -hy + j as f32;
-            let (dst, c) = if j == 0 || j == ny {
-                (&mut major, border_c)
-            } else if j % 10 == 0 {
-                (&mut major, major_c)
-            } else {
-                (&mut minor, minor_c)
-            };
-            line(dst, [-hx, y, 0.0], [hx, y, 0.0], c);
-        }
+            line(&mut major, a0, b0, border_c);
+            line(&mut major, a1, b1, border_c);
+        };
+        push_lines(0);
+        push_lines(1);
         let mk = |v: &Vec<LineVertex>| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("grid"),
@@ -476,7 +486,7 @@ impl Renderer {
             })
         };
         self.plane = Some(Plane {
-            size,
+            key,
             quad,
             major: mk(&major),
             major_count: major.len() as u32,
@@ -631,7 +641,7 @@ impl Renderer {
             self.upload_mesh(device, it.key, &it.mesh);
         }
         if let Some(wp) = scene.workplane {
-            self.ensure_plane(device, wp);
+            self.ensure_plane(device, wp, scene.grid.unwrap_or((1.0, 10.0)));
         }
         let extra_buf = (!scene.extra_lines.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -688,14 +698,16 @@ impl Renderer {
                     pass.set_vertex_buffer(0, pl.quad.slice(..));
                     pass.draw(0..6, 0..1);
                 }
-                pass.set_pipeline(&self.line_pipe);
-                pass.set_bind_group(1, &self.obj_bg, &[0]);
-                if scene.fine_grid {
-                    pass.set_vertex_buffer(0, pl.minor.slice(..));
-                    pass.draw(0..pl.minor_count, 0..1);
+                if scene.grid.is_some() {
+                    pass.set_pipeline(&self.line_pipe);
+                    pass.set_bind_group(1, &self.obj_bg, &[0]);
+                    if scene.fine_grid {
+                        pass.set_vertex_buffer(0, pl.minor.slice(..));
+                        pass.draw(0..pl.minor_count, 0..1);
+                    }
+                    pass.set_vertex_buffer(0, pl.major.slice(..));
+                    pass.draw(0..pl.major_count, 0..1);
                 }
-                pass.set_vertex_buffer(0, pl.major.slice(..));
-                pass.draw(0..pl.major_count, 0..1);
             }
 
             if let Some(buf) = &extra_buf {

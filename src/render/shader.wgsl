@@ -133,6 +133,11 @@ struct LineOut {
 fn vs_line(v: LineIn) -> LineOut {
     var out: LineOut;
     out.clip = g.view_proj * vec4<f32>(v.pos, 1.0);
+    // Push the grid slightly behind surfaces lying on the workplane, so a
+    // shape's bottom face never flickers with grid lines (seen from below).
+    if (g.cam_pos.z < 0.0) {
+        out.clip.z = out.clip.z + 0.00004 * out.clip.w;
+    }
     out.color = v.color;
     out.world = v.pos;
     return out;

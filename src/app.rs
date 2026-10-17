@@ -7,7 +7,9 @@ use crate::geom::{self, GeomCache};
 use crate::icons::{self, Icon};
 use crate::meshio;
 use crate::ops;
+use crate::prefs::Prefs;
 use crate::render::camera::Camera;
+use crate::units;
 use crate::render::{Renderer, Target};
 use crate::viewport::{Drag, MeasureState, Tool};
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, RichText, vec2};
@@ -46,6 +48,11 @@ pub struct OrionApp {
     pub drag: Option<Drag>,
     pub tool: Tool,
     pub measure: MeasureState,
+    pub prefs: Prefs,
+    pub dim_active: Option<crate::viewport::HandleKind>,
+    pub dim_rects: Vec<egui::Rect>,
+    pub dim_text: [Option<String>; 3],
+    settings_open: bool,
 
     pub renderer: Option<Renderer>,
     pub view_target: Option<Target>,
@@ -69,7 +76,9 @@ impl OrionApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
         let renderer = cc.wgpu_render_state.as_ref().map(|rs| Renderer::new(&rs.device));
         setup_style(&cc.egui_ctx);
-        let doc = Document::default();
+        let prefs = Prefs::load();
+        let mut doc = Document::default();
+        doc.settings = prefs.new_design.clone();
         let mut app = OrionApp {
             saved: doc.clone(),
             stable: doc.clone(),
@@ -85,6 +94,11 @@ impl OrionApp {
             drag: None,
             tool: Tool::Select,
             measure: MeasureState::default(),
+            prefs,
+            dim_active: None,
+            dim_rects: Vec::new(),
+            dim_text: [None, None, None],
+            settings_open: false,
             renderer,
             view_target: None,
             thumbs: HashMap::new(),
@@ -195,6 +209,7 @@ impl OrionApp {
         match p {
             Pending::New => {
                 self.doc = Document::default();
+                self.doc.settings = self.prefs.new_design.clone();
                 self.path = None;
                 self.selection.clear();
                 self.tool = Tool::Select;
@@ -885,6 +900,147 @@ impl OrionApp {
             });
     }
 
+    /// Workspace settings, as a floating panel (not a dialog).
+    fn settings_panel(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let screen = ctx.content_rect();
+        egui::Area::new(egui::Id::unique("settings_panel"))
+            .fixed_pos(egui::pos2(screen.max.x - 16.0, screen.max.y - 40.0))
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(16).show(ui, |ui| {
+                    ui.set_width(360.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Workspace settings").strong().size(18.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("X").size(14.0)).frame(false)).on_hover_text("Close").clicked() {
+                                self.settings_open = false;
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    let label = |ui: &mut egui::Ui, t: &str| {
+                        ui.horizontal(|ui| {
+                            ui.set_min_width(150.0);
+                            ui.label(RichText::new(t).color(Color32::from_gray(90)));
+                        });
+                    };
+                    let mut prefs_changed = false;
+                    egui::Grid::new("settings_grid").num_columns(2).spacing([10.0, 10.0]).show(ui, |ui| {
+                        label(ui, "Background colour");
+                        let mut c = self.prefs.background.0;
+                        if ui.color_edit_button_srgb(&mut c).changed() {
+                            self.prefs.background = Rgb(c);
+                            prefs_changed = true;
+                        }
+                        ui.end_row();
+                        label(ui, "Show grid");
+                        prefs_changed |= ui.checkbox(&mut self.prefs.show_grid, "").changed();
+                        ui.end_row();
+                        label(ui, "Zoom speed");
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Slow").size(11.0));
+                            prefs_changed |= ui.add(egui::Slider::new(&mut self.prefs.zoom_speed, 1..=10).show_value(false)).changed();
+                            ui.label(RichText::new("Fast").size(11.0));
+                        });
+                        ui.end_row();
+                    });
+                    if prefs_changed {
+                        let _ = self.prefs.save();
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    let st = &mut self.doc.settings;
+                    let old_unit = st.unit();
+                    egui::Grid::new("settings_grid2").num_columns(2).spacing([10.0, 10.0]).show(ui, |ui| {
+                        label(ui, "Units");
+                        egui::ComboBox::from_id_salt("units")
+                            .width(190.0)
+                            .selected_text(match st.units {
+                                units::Units::Metric => "Metric (default)",
+                                units::Units::Imperial => "Imperial",
+                            })
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_value(&mut st.units, units::Units::Metric, "Metric (default)").changed()
+                                    || ui.selectable_value(&mut st.units, units::Units::Imperial, "Imperial").changed()
+                                {
+                                    st.scale = 1;
+                                }
+                            });
+                        ui.end_row();
+                        label(ui, "Scale");
+                        let scales = units::scales(st.units);
+                        let cur = scales.iter().find(|s| s.0 == st.scale).map(|s| s.1).unwrap_or(scales[0].1);
+                        egui::ComboBox::from_id_salt("scale").width(190.0).selected_text(cur).show_ui(ui, |ui| {
+                            for (v, l, _) in scales {
+                                ui.selectable_value(&mut st.scale, *v, *l);
+                            }
+                        });
+                        ui.end_row();
+                        label(ui, "Printer / workplane");
+                        egui::ComboBox::from_id_salt("preset").width(190.0).selected_text(st.preset.clone()).show_ui(ui, |ui| {
+                            for (name, w, l) in units::PRESETS {
+                                let txt = format!("{name}  ({w} x {l})");
+                                if ui.selectable_label(st.preset == *name, txt).clicked() {
+                                    st.preset = name.to_string();
+                                    st.workplane = [*w, *l];
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    });
+                    if st.unit() != old_unit {
+                        st.snap = st.unit().default_snap();
+                        units::set(st.unit());
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(160.0);
+                        for (i, l) in ["Width", "Length"].iter().enumerate() {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(*l).size(12.0));
+                                let mut v = units::to_disp(st.workplane[i]);
+                                if ui
+                                    .add(egui::DragValue::new(&mut v).speed(1.0).range(units::to_disp(10.0)..=units::to_disp(100000.0)).max_decimals(units::decimals()))
+                                    .changed()
+                                {
+                                    st.workplane[i] = units::from_disp(v);
+                                    st.preset = units::PRESETS[0].0.to_string();
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(160.0);
+                        if ui
+                            .add(egui::Button::new("Make default").min_size(vec2(190.0, 28.0)))
+                            .on_hover_text("Use these units, scale and workplane for new designs")
+                            .clicked()
+                        {
+                            self.prefs.new_design = self.doc.settings.clone();
+                            match self.prefs.save() {
+                                Ok(()) => self.status = Some(("Saved as the default for new designs".into(), 0.0)),
+                                Err(e) => self.status = Some((format!("Could not save settings: {e}"), 0.0)),
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new("Close settings").min_size(vec2(120.0, 28.0))).clicked() {
+                            self.settings_open = false;
+                        }
+                    });
+                });
+            });
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let now = ui.ctx().input(|i| i.time);
         egui::Panel::bottom("status")
@@ -908,13 +1064,17 @@ impl OrionApp {
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let snaps = [0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0];
-                        let cur = self.doc.settings.snap;
-                        let label = |v: f64| if v == 0.0 { "Off".to_string() } else { format!("{v:.1} mm") };
-                        egui::ComboBox::from_id_salt("snap").selected_text(label(cur)).show_ui(ui, |ui| {
-                            for s in snaps {
-                                if ui.selectable_label(cur == s, label(s)).clicked() {
-                                    self.doc.settings.snap = s;
+                        if ui.selectable_label(self.settings_open, "Settings").clicked() {
+                            self.settings_open = !self.settings_open;
+                        }
+                        ui.add_space(10.0);
+                        let unit = self.doc.settings.unit();
+                        let cur = units::to_disp(self.doc.settings.snap);
+                        let near = |a: f64, b: f64| (a - b).abs() < 1e-6 * a.abs().max(1.0);
+                        egui::ComboBox::from_id_salt("snap").selected_text(units::snap_label(cur)).show_ui(ui, |ui| {
+                            for &s in unit.snaps() {
+                                if ui.selectable_label(near(cur, s), units::snap_label(s)).clicked() {
+                                    self.doc.settings.snap = units::from_disp(s);
                                 }
                             }
                         });
@@ -973,6 +1133,7 @@ impl eframe::App for OrionApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
+        units::set(self.doc.settings.unit());
         self.make_thumbnails(frame);
         self.shortcuts(&ctx);
 
@@ -983,6 +1144,7 @@ impl eframe::App for OrionApp {
             self.viewport(ui, frame);
         });
         self.export_panel(&ctx);
+        self.settings_panel(&ctx);
 
         // History: commit only when the user isn't mid-interaction.
         let busy = ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input();

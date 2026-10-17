@@ -40,7 +40,8 @@ The first build takes several minutes (it compiles the geometry kernel). Later b
 | Add a shape | Click it in the library (adds at the view centre) or drag it onto the workplane |
 | Select | Click; Shift+click to add/remove; drag on empty space for a box selection |
 | Move | Drag the object. Alt+drag moves a copy |
-| Resize | White corner squares (X+Y), black side squares (one axis), top square (height). Shift = uniform, Alt = about the centre |
+| Resize | White corner squares (X+Y), black side squares (one axis), top square (height). Shift = uniform, Alt = about the centre. Hover a handle to see its dimensions; click a value, type a new size and press Enter (e.g. `35`, `1 1/2`, `2cm`, `0.5in`) |
+| Seen from below | Viewing from underneath flips the handles: the height handle and lift cone move to the bottom and work downwards |
 | Raise / lower | Drag the black cone above the object |
 | Rotate | Drag a curved arrow. Snaps 22.5 deg; Shift = 45 deg, Ctrl = 1 deg; Alt rotates a copy |
 | Orbit | Right-drag, or Ctrl+Left-drag |
@@ -66,6 +67,16 @@ The first build takes several minutes (it compiles the geometry kernel). Later b
 | New / Open / Save / Save As | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 | Export | Ctrl+E |
 | Leave a tool, or clear the selection | Esc |
+
+### Workspace settings
+
+Click **Settings** at the bottom right. The options are:
+
+- **Background colour, Show grid, Zoom speed**: saved for every design.
+- **Units**: Metric or Imperial.
+- **Scale**: millimetres, centimetres or metres; or inches or feet. Designs are always stored in millimetres, so changing units only changes what you see and type.
+- **Printer / workplane**: printer presets set the workplane to that printer's bed (Bambu Lab, Prusa, Creality and others). You can also type a custom width and length. The default is 300 x 300 mm.
+- **Make default**: uses the current units, scale and workplane for new designs.
 
 ### Group types
 

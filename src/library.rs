@@ -62,6 +62,7 @@ impl OrionApp {
                     clear: [0.0, 0.0, 0.0, 0.0],
                     extra_lines: &[],
                     fine_grid: false,
+                    grid: None,
                     grid_fade: 1.0,
                     ppp,
                     footprint: None,

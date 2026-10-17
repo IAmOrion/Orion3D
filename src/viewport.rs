@@ -8,6 +8,7 @@ use crate::icons;
 use crate::measure::{self, Feature};
 use crate::ops;
 use crate::render::{DrawItem, SceneParams};
+use crate::units;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 use glam::{DMat4, DVec3, Vec3};
 use std::collections::HashMap;
@@ -35,6 +36,8 @@ pub struct Handle {
     kind: HandleKind,
     pos: Pos2,
     arc: Vec<Pos2>,
+    /// Lift cone points down (view from below).
+    down: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,7 +78,7 @@ pub enum Drag {
         delta: DVec3,
     },
     Lift { originals: ops::Originals, origin: DVec3, start_s: f64, delta: f64 },
-    Scale { originals: ops::Originals, kind: HandleKind, lo: DVec3, hi: DVec3 },
+    Scale { originals: ops::Originals, kind: HandleKind, lo: DVec3, hi: DVec3, flip: bool },
     Rotate {
         originals: ops::Originals,
         axis: usize,
@@ -213,6 +216,11 @@ impl OrionApp {
         best
     }
 
+    /// True when the camera is below the selection, so handles flip.
+    pub fn view_from_below(&self, lo: DVec3) -> bool {
+        (self.camera.eye().z as f64) < lo.z
+    }
+
     fn handle_gap(&self) -> f64 {
         self.camera.dist as f64 * 0.045
     }
@@ -263,7 +271,7 @@ impl OrionApp {
         let c = (lo + hi) * 0.5;
         let mut add = |kind, p: DVec3| {
             if let Some(pos) = self.project(v, p) {
-                out.push(Handle { kind, pos, arc: Vec::new() });
+                out.push(Handle { kind, pos, arc: Vec::new(), down: false });
             }
         };
         let g = self.handle_gap();
@@ -272,21 +280,28 @@ impl OrionApp {
                 if matches!(self.tool, Tool::Measure) || self.selection_locked() {
                     return out;
                 }
+                // Seen from below, everything flips: the footprint handles
+                // move to the top face, the height handle and lift cone to
+                // the bottom (like Tinkercad).
+                let flip = self.view_from_below(lo);
+                let (zf, zh, zl) = if flip { (hi.z, lo.z, lo.z - g * 1.4) } else { (lo.z, hi.z, hi.z + g * 1.4) };
                 for (sx, sy) in [(-1i8, -1i8), (1, -1), (1, 1), (-1, 1)] {
                     let x = if sx < 0 { lo.x } else { hi.x };
                     let y = if sy < 0 { lo.y } else { hi.y };
-                    add(HandleKind::Corner(sx, sy), DVec3::new(x, y, lo.z));
+                    add(HandleKind::Corner(sx, sy), DVec3::new(x, y, zf));
                 }
-                add(HandleKind::Side(0, -1), DVec3::new(lo.x, c.y, lo.z));
-                add(HandleKind::Side(0, 1), DVec3::new(hi.x, c.y, lo.z));
-                add(HandleKind::Side(1, -1), DVec3::new(c.x, lo.y, lo.z));
-                add(HandleKind::Side(1, 1), DVec3::new(c.x, hi.y, lo.z));
-                add(HandleKind::Top, DVec3::new(c.x, c.y, hi.z));
-                add(HandleKind::Lift, DVec3::new(c.x, c.y, hi.z + g * 1.4));
+                add(HandleKind::Side(0, -1), DVec3::new(lo.x, c.y, zf));
+                add(HandleKind::Side(0, 1), DVec3::new(hi.x, c.y, zf));
+                add(HandleKind::Side(1, -1), DVec3::new(c.x, lo.y, zf));
+                add(HandleKind::Side(1, 1), DVec3::new(c.x, hi.y, zf));
+                add(HandleKind::Top, DVec3::new(c.x, c.y, zh));
+                if let Some(pos) = self.project(v, DVec3::new(c.x, c.y, zl)) {
+                    out.push(Handle { kind: HandleKind::Lift, pos, arc: Vec::new(), down: flip });
+                }
                 for axis in 0..3 {
                     let pts = self.arrow_glyph(v, axis, lo, hi);
                     if pts.len() > 2 {
-                        out.push(Handle { kind: HandleKind::Rotate(axis), pos: pts[pts.len() / 2], arc: pts });
+                        out.push(Handle { kind: HandleKind::Rotate(axis), pos: pts[pts.len() / 2], arc: pts, down: false });
                     }
                 }
             }
@@ -306,7 +321,7 @@ impl OrionApp {
                     ];
                     for (axis, a, b) in lines {
                         if let (Some(pa), Some(pb)) = (self.project(v, a), self.project(v, b)) {
-                            out.push(Handle { kind: HandleKind::AlignDot(axis, k), pos: pb, arc: vec![pa, pb] });
+                            out.push(Handle { kind: HandleKind::AlignDot(axis, k), pos: pb, arc: vec![pa, pb], down: false });
                         }
                     }
                 }
@@ -323,7 +338,7 @@ impl OrionApp {
                     if let (Some(pos), Some(a), Some(b)) =
                         (self.project(v, at), self.project(v, at - dir), self.project(v, at + dir))
                     {
-                        out.push(Handle { kind: HandleKind::MirrorArrow(axis), pos, arc: vec![a, b] });
+                        out.push(Handle { kind: HandleKind::MirrorArrow(axis), pos, arc: vec![a, b], down: false });
                     }
                 }
             }
@@ -410,7 +425,7 @@ impl OrionApp {
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.0 {
                 let towards = pointer.map(|p| self.zoom_point(&items, &v, p));
-                self.camera.zoom((-scroll * 0.0025).exp(), towards);
+                self.camera.zoom((-scroll * self.prefs.zoom_rate()).exp(), towards);
             }
         }
 
@@ -496,6 +511,7 @@ impl OrionApp {
             );
         }
         self.tool_banner(ui, rect);
+        self.dimensions(ui, &v, bounds, hovered_handle, pointer);
 
         self.view_controls(ui, rect);
         if self.tool != Tool::Measure {
@@ -574,7 +590,7 @@ impl OrionApp {
             match kind {
                 HandleKind::Lift => {
                     let c = (lo + hi) * 0.5;
-                    let origin = DVec3::new(c.x, c.y, hi.z);
+                    let origin = DVec3::new(c.x, c.y, if self.view_from_below(lo) { lo.z } else { hi.z });
                     let start_s = line_param(origin, DVec3::Z, o, d).unwrap_or(0.0);
                     self.drag = Some(Drag::Lift { originals, origin, start_s, delta: 0.0 });
                 }
@@ -596,7 +612,7 @@ impl OrionApp {
                         applied: 0.0,
                     });
                 }
-                _ => self.drag = Some(Drag::Scale { originals, kind, lo, hi }),
+                _ => self.drag = Some(Drag::Scale { originals, kind, lo, hi, flip: self.view_from_below(lo) }),
             }
             return;
         }
@@ -681,8 +697,11 @@ impl OrionApp {
                     ops::apply(&mut self.doc, originals, DMat4::from_translation(DVec3::Z * *dz), false);
                 }
             }
-            Drag::Scale { originals, kind, lo, hi } => {
+            Drag::Scale { originals, kind, lo, hi, flip } => {
+                let flip = *flip;
                 let (o, d) = self.ray(v, p);
+                let zf = if flip { hi.z } else { lo.z };
+                let plane = DVec3::new(lo.x, lo.y, zf);
                 let size = *hi - *lo;
                 let center = (*lo + *hi) * 0.5;
                 let min = if snap > 0.0 { snap } else { 0.1 };
@@ -694,7 +713,7 @@ impl OrionApp {
                 let mut anchor = *lo;
                 match *kind {
                     HandleKind::Corner(sx, sy) => {
-                        if let Some(h) = ray_plane(o, d, *lo, DVec3::Z) {
+                        if let Some(h) = ray_plane(o, d, plane, DVec3::Z) {
                             anchor.x = if sx > 0 { lo.x } else { hi.x };
                             anchor.y = if sy > 0 { lo.y } else { hi.y };
                             let ax = if mods.alt { center.x } else { anchor.x };
@@ -707,7 +726,7 @@ impl OrionApp {
                         }
                     }
                     HandleKind::Side(axis, sign) => {
-                        if let Some(h) = ray_plane(o, d, *lo, DVec3::Z) {
+                        if let Some(h) = ray_plane(o, d, plane, DVec3::Z) {
                             anchor[axis] = if sign > 0 { lo[axis] } else { hi[axis] };
                             anchor[1 - axis] = center[1 - axis];
                             let a = if mods.alt { center[axis] } else { anchor[axis] };
@@ -718,9 +737,11 @@ impl OrionApp {
                         }
                     }
                     HandleKind::Top => {
-                        anchor = DVec3::new(center.x, center.y, lo.z);
+                        // From below, the height handle pulls the bottom down.
+                        let (az, dir) = if flip { (hi.z, -DVec3::Z) } else { (lo.z, DVec3::Z) };
+                        anchor = DVec3::new(center.x, center.y, az);
                         let base = if mods.alt { center } else { anchor };
-                        if let Some(t) = line_param(base, DVec3::Z, o, d) {
+                        if let Some(t) = line_param(base, dir, o, d) {
                             s.z = fit(t * k) / size.z.max(1e-9);
                             if mods.shift {
                                 s = DVec3::splat(s.z);
@@ -732,8 +753,8 @@ impl OrionApp {
                 if mods.alt {
                     anchor = center;
                 } else if mods.shift {
-                    // Uniform scale keeps the object on the plane.
-                    anchor.z = lo.z;
+                    // Uniform scale keeps the handle face where it is.
+                    anchor.z = if flip { hi.z } else { lo.z };
                 }
                 ops::apply(&mut self.doc, originals, ops::scale_about(anchor, s), true);
             }
@@ -812,6 +833,201 @@ impl OrionApp {
             }
             _ => {}
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Dimension lines with editable values (hover a resize handle)
+    // ----------------------------------------------------------------------
+
+    /// (axis, edge start, edge end, outward direction, offset) per dimension.
+    fn dims_for(&self, kind: HandleKind, lo: DVec3, hi: DVec3) -> Vec<(usize, DVec3, DVec3, DVec3, f64)> {
+        let c = (lo + hi) * 0.5;
+        let g = self.handle_gap() * 1.3;
+        let flip = self.view_from_below(lo);
+        let zf = if flip { hi.z } else { lo.z };
+        let eye = self.camera.eye().as_dvec3();
+        let mut out = Vec::new();
+        let mut along = |axis: usize, other: usize, side: f64| {
+            let mut a = DVec3::new(lo.x, lo.y, zf);
+            let mut b = a;
+            a[axis] = lo[axis];
+            b[axis] = hi[axis];
+            let v = if side < 0.0 { lo[other] } else { hi[other] };
+            a[other] = v;
+            b[other] = v;
+            let mut dir = DVec3::ZERO;
+            dir[other] = side;
+            out.push((axis, a, b, dir, g));
+        };
+        match kind {
+            HandleKind::Corner(sx, sy) => {
+                along(0, 1, sy as f64);
+                along(1, 0, sx as f64);
+            }
+            HandleKind::Side(axis, _) => {
+                let other = 1 - axis;
+                let side = if eye[other] < c[other] { -1.0 } else { 1.0 };
+                along(axis, other, side);
+            }
+            HandleKind::Top => {
+                // Vertical, off to the right of the selection as seen on screen.
+                let view = self.camera.view();
+                let r = view.row(0).truncate().as_dvec3();
+                let r = DVec3::new(r.x, r.y, 0.0).normalize_or(DVec3::X);
+                let half = ((hi - lo) * 0.5).abs().dot(r.abs());
+                let a = DVec3::new(c.x, c.y, lo.z);
+                let b = DVec3::new(c.x, c.y, hi.z);
+                out.push((2, a, b, r, half + g));
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn dimensions(
+        &mut self,
+        ui: &mut egui::Ui,
+        v: &View,
+        bounds: Option<(DVec3, DVec3)>,
+        hovered: Option<HandleKind>,
+        pointer: Option<Pos2>,
+    ) {
+        let resize = |k: Option<HandleKind>| k.filter(|k| matches!(k, HandleKind::Corner(..) | HandleKind::Side(..) | HandleKind::Top));
+        let editing = self.dim_text.iter().any(|t| t.is_some());
+        let in_box = pointer.is_some_and(|p| self.dim_rects.iter().any(|r| r.contains(p)));
+        let dragging = match &self.drag {
+            Some(Drag::Scale { kind, .. }) => Some(*kind),
+            _ => None,
+        };
+        self.dim_active = if self.tool != Tool::Select || self.selection_locked() {
+            None
+        } else if let Some(k) = resize(dragging) {
+            Some(k)
+        } else if let Some(k) = resize(hovered) {
+            Some(k)
+        } else if editing || in_box {
+            self.dim_active
+        } else {
+            None
+        };
+        self.dim_rects.clear();
+        let (Some(kind), Some((lo, hi))) = (self.dim_active, bounds) else {
+            self.dim_text = [None, None, None];
+            return;
+        };
+
+        let painter = ui.painter_at(v.rect);
+        let col = Color32::from_gray(35);
+        let st = Stroke::new(1.3, col);
+        let mut boxes = Vec::new();
+        // Everything drawn counts as "still hovering", so the pointer can
+        // travel from the handle to a value box without the dimensions
+        // disappearing.
+        let mut zone: Vec<Pos2> = Vec::new();
+        for (axis, a, b, dir, off) in self.dims_for(kind, lo, hi) {
+            let ext = self.handle_gap() * 0.5;
+            let (Some(a0), Some(b0), Some(a1), Some(b1), Some(a2), Some(b2)) = (
+                self.project(v, a),
+                self.project(v, b),
+                self.project(v, a + dir * off),
+                self.project(v, b + dir * off),
+                self.project(v, a + dir * (off + ext)),
+                self.project(v, b + dir * (off + ext)),
+            ) else {
+                continue;
+            };
+            zone.extend([a0, b0, a2, b2]);
+            painter.line_segment([a0, a2], st);
+            painter.line_segment([b0, b2], st);
+            if a1.distance(b1) > 6.0 {
+                icons::curved_double_arrow(&painter, &[a1, b1], col, 1.3);
+            }
+            // Value box beyond the dimension line, pushed outward on screen.
+            let mid = a1.lerp(b1, 0.5);
+            let outward = (a2.lerp(b2, 0.5) - mid).normalized();
+            let at = mid + outward * 34.0;
+            zone.push(at);
+            boxes.push((axis, at, hi[axis] - lo[axis]));
+        }
+
+        let mut apply: Option<(usize, f64)> = None;
+        for (axis, at, size) in boxes {
+            let id = egui::Id::unique(("dim_box", axis));
+            let resp = egui::Area::new(id)
+                .fixed_pos(at)
+                .pivot(Align2::CENTER_CENTER)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(Color32::WHITE)
+                        .corner_radius(4)
+                        .stroke(Stroke::new(1.0, Color32::from_gray(225)))
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .show(ui, |ui| {
+                            let mut text = self.dim_text[axis].clone().unwrap_or_else(|| units::num(size));
+                            let te = ui.add(
+                                egui::TextEdit::singleline(&mut text)
+                                    .id(egui::Id::unique(("dim_text", axis)))
+                                    .font(FontId::proportional(16.0))
+                                    .frame(egui::Frame::NONE)
+                                    .align(egui::Align2::CENTER_CENTER)
+                                    .desired_width(70.0),
+                            );
+                            if te.gained_focus() {
+                                // Select everything so typing replaces it.
+                                let mut st = egui::text_edit::TextEditState::load(ui.ctx(), te.id).unwrap_or_default();
+                                let r = egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(0),
+                                    egui::text::CCursor::new(text.chars().count()),
+                                );
+                                st.cursor.set_char_range(Some(r));
+                                st.store(ui.ctx(), te.id);
+                            }
+                            if te.has_focus() {
+                                self.dim_text[axis] = Some(text.clone());
+                            }
+                            if te.lost_focus() {
+                                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    if let Some(mm) = units::parse(&text) {
+                                        apply = Some((axis, mm));
+                                    }
+                                }
+                                self.dim_text[axis] = None;
+                            }
+                        });
+                });
+            self.dim_rects.push(resp.response.rect);
+        }
+        if !zone.is_empty() {
+            self.dim_rects.push(Rect::from_points(&zone).expand(24.0));
+        }
+        if let Some((axis, mm)) = apply {
+            self.set_dimension(kind, axis, mm, lo, hi);
+        }
+    }
+
+    /// Resize the selection so `axis` measures `new_size`, keeping the side
+    /// opposite the handle fixed.
+    fn set_dimension(&mut self, kind: HandleKind, axis: usize, new_size: f64, lo: DVec3, hi: DVec3) {
+        let size = hi[axis] - lo[axis];
+        if new_size <= 0.0 || size <= 1e-9 {
+            return;
+        }
+        let mut anchor = (lo + hi) * 0.5;
+        match kind {
+            HandleKind::Corner(sx, sy) => {
+                anchor.x = if sx > 0 { lo.x } else { hi.x };
+                anchor.y = if sy > 0 { lo.y } else { hi.y };
+            }
+            HandleKind::Side(a, sign) => anchor[a] = if sign > 0 { lo[a] } else { hi[a] },
+            HandleKind::Top => anchor.z = if self.view_from_below(lo) { hi.z } else { lo.z },
+            _ => {}
+        }
+        let mut f = DVec3::ONE;
+        f[axis] = new_size / size;
+        let ids: Vec<NodeId> = self.selection.iter().copied().filter(|id| self.doc.get(*id).is_some_and(|n| !n.locked)).collect();
+        let orig = ops::originals(&self.doc, &ids);
+        ops::apply(&mut self.doc, &orig, ops::scale_about(anchor, f), true);
     }
 
     // ----------------------------------------------------------------------
@@ -1079,7 +1295,7 @@ impl OrionApp {
                     p.line_segment([a, b], Stroke::new(2.0, Color32::from_rgb(20, 30, 45)));
                     p.circle_filled(a, 3.5, Color32::from_rgb(20, 30, 45));
                     p.circle_filled(b, 3.5, Color32::from_rgb(20, 30, 45));
-                    let text = measure::mm(r.from.distance(r.to));
+                    let text = units::fmt(r.from.distance(r.to));
                     let font = FontId::proportional(14.0);
                     let galley = p.layout_no_wrap(text, font, Color32::WHITE);
                     let at = Rect::from_center_size(a.lerp(b, 0.5), galley.size() + vec2(12.0, 6.0));
@@ -1166,47 +1382,48 @@ impl OrionApp {
             });
         }
 
-        let bg = egui::Rgba::from(Color32::from_rgb(0xf3, 0xf5, 0xf8));
+        let b = self.prefs.background.0;
+        let bg = egui::Rgba::from(Color32::from_rgb(b[0], b[1], b[2]));
         let aspect = rect.width() / rect.height();
         let wp = self.doc.settings.workplane;
+        let (gmin, gmaj) = self.doc.settings.unit().grid();
+        let footprint = bounds.filter(|_| self.tool != Tool::Measure).map(|(lo, hi)| {
+            let z = if self.view_from_below(lo) { hi.z } else { lo.z } as f32;
+            [
+                Vec3::new(lo.x as f32, lo.y as f32, z),
+                Vec3::new(hi.x as f32, lo.y as f32, z),
+                Vec3::new(hi.x as f32, hi.y as f32, z),
+                Vec3::new(lo.x as f32, hi.y as f32, z),
+            ]
+        });
+        let params = SceneParams {
+            view_proj: self.camera.view_proj(aspect),
+            eye: self.camera.eye(),
+            items: &draw,
+            workplane: Some([wp[0] as f32, wp[1] as f32]),
+            clear: [bg.r() as f64, bg.g() as f64, bg.b() as f64, 1.0],
+            extra_lines: &[],
+            fine_grid: self.camera.dist < 400.0 * gmin as f32,
+            grid: self.prefs.show_grid.then_some((gmin as f32, gmaj as f32)),
+            grid_fade: self.camera.dist * 0.9 * (gmin as f32).max(1.0),
+            ppp,
+            footprint,
+        };
         let renderer = self.renderer.as_mut().unwrap();
         if self.view_target.is_none() {
             self.view_target = Some(renderer.create_target(&rs.device, size));
         }
-        let tex = renderer.render(
-            rs,
-            self.view_target.as_mut().unwrap(),
-            size,
-            &SceneParams {
-                view_proj: self.camera.view_proj(aspect),
-                eye: self.camera.eye(),
-                items: &draw,
-                workplane: Some([wp[0] as f32, wp[1] as f32]),
-                clear: [bg.r() as f64, bg.g() as f64, bg.b() as f64, 1.0],
-                extra_lines: &[],
-                fine_grid: self.camera.dist < 400.0,
-                grid_fade: self.camera.dist * 0.9,
-                ppp,
-                footprint: bounds.filter(|_| self.tool != Tool::Measure).map(|(lo, hi)| {
-                    let z = lo.z as f32;
-                    [
-                        Vec3::new(lo.x as f32, lo.y as f32, z),
-                        Vec3::new(hi.x as f32, lo.y as f32, z),
-                        Vec3::new(hi.x as f32, hi.y as f32, z),
-                        Vec3::new(lo.x as f32, hi.y as f32, z),
-                    ]
-                }),
-            },
-        );
+        let tex = renderer.render(rs, self.view_target.as_mut().unwrap(), size, &params);
         ui.painter().image(tex, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
 
     /// Footprint on the floor, dashed outline and centre line, like Tinkercad.
     fn draw_selection_frame(&self, painter: &egui::Painter, v: &View, lo: DVec3, hi: DVec3) {
         let c = (lo + hi) * 0.5;
+        let zf = if self.view_from_below(lo) { hi.z } else { lo.z };
         let foot: Vec<Pos2> = [(lo.x, lo.y), (hi.x, lo.y), (hi.x, hi.y), (lo.x, hi.y)]
             .iter()
-            .filter_map(|(x, y)| self.project(v, DVec3::new(*x, *y, lo.z)))
+            .filter_map(|(x, y)| self.project(v, DVec3::new(*x, *y, zf)))
             .collect();
         if foot.len() == 4 {
             let stroke = Stroke::new(1.2, Color32::from_rgba_unmultiplied(30, 40, 55, 200));
@@ -1247,17 +1464,17 @@ impl OrionApp {
         match &self.drag {
             Some(Drag::Scale { .. }) => {
                 if let Some(p) = self.project(v, DVec3::new(hi.x, (lo.y + hi.y) * 0.5, lo.z)) {
-                    label(painter, p + vec2(0.0, 26.0), format!("{:.2} x {:.2} x {:.2} mm", size.x, size.y, size.z));
+                    label(painter, p + vec2(0.0, 26.0), format!("{} x {} x {}", units::num(size.x), units::num(size.y), units::fmt(size.z)));
                 }
             }
             Some(Drag::Move { moved: true, delta, .. }) => {
                 if let Some(p) = self.project(v, DVec3::new((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5, lo.z)) {
-                    label(painter, p + vec2(0.0, 28.0), format!("X {:+.2}  Y {:+.2}", delta.x, delta.y));
+                    label(painter, p + vec2(0.0, 28.0), format!("X {}  Y {}", units::signed(delta.x), units::signed(delta.y)));
                 }
             }
             Some(Drag::Lift { delta, .. }) => {
                 if let Some(p) = self.project(v, DVec3::new((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5, hi.z)) {
-                    label(painter, p + vec2(40.0, -20.0), format!("Z {:+.2}  (bottom {:.2})", delta, lo.z));
+                    label(painter, p + vec2(40.0, -20.0), format!("Z {}  (bottom {})", units::signed(*delta), units::fmt(lo.z)));
                 }
             }
             Some(Drag::Rotate { axis, ring, radius, applied, .. }) => {
@@ -1330,7 +1547,7 @@ impl OrionApp {
 }
 
 fn draw_handle(p: &egui::Painter, h: &Handle, hot: bool) {
-    let hot_fill = ACCENT;
+    let hot_fill = Color32::from_rgb(0xd9, 0x3a, 0x2b);
     match h.kind {
         HandleKind::Corner(..) | HandleKind::Top => {
             let r = Rect::from_center_size(h.pos, Vec2::splat(HANDLE_R * 2.0));
@@ -1343,7 +1560,8 @@ fn draw_handle(p: &egui::Painter, h: &Handle, hot: bool) {
         }
         HandleKind::Lift => {
             let c = h.pos;
-            let pts = vec![c + vec2(0.0, -9.0), c + vec2(6.5, 6.0), c + vec2(-6.5, 6.0)];
+            let sy = if h.down { -1.0 } else { 1.0 };
+            let pts = vec![c + vec2(0.0, -9.0 * sy), c + vec2(6.5, 6.0 * sy), c + vec2(-6.5, 6.0 * sy)];
             p.add(egui::Shape::convex_polygon(pts, if hot { hot_fill } else { Color32::from_gray(25) }, Stroke::NONE));
         }
         HandleKind::Rotate(_) => {

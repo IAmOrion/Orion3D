@@ -10,7 +10,9 @@ mod library;
 mod measure;
 mod meshio;
 mod ops;
+mod prefs;
 mod render;
+mod units;
 mod viewport;
 
 #[cfg(test)]

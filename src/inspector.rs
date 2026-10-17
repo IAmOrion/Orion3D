@@ -18,8 +18,20 @@ fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> bool) 
     changed
 }
 
+/// Length slider: stores mm, shows and accepts the workspace units.
 fn slider_mm(v: &mut f64, range: std::ops::RangeInclusive<f64>) -> egui::Slider<'_> {
-    egui::Slider::new(v, range).max_decimals(2).clamping(egui::SliderClamping::Never)
+    egui::Slider::new(v, range)
+        .clamping(egui::SliderClamping::Never)
+        .custom_formatter(|v, _| crate::units::num(v))
+        .custom_parser(crate::units::parse)
+}
+
+/// Length field: stores mm, shows and accepts the workspace units.
+fn len_field(v: &mut f64) -> DragValue<'_> {
+    DragValue::new(v)
+        .speed(0.1 * crate::units::current().mm())
+        .custom_formatter(|v, _| crate::units::num(v))
+        .custom_parser(crate::units::parse)
 }
 
 fn slider_n(v: &mut u32, range: std::ops::RangeInclusive<u32>) -> egui::Slider<'_> {
@@ -172,7 +184,7 @@ impl OrionApp {
                     .stroke(Stroke::new(1.0, Color32::from_gray(222)))
                     .inner_margin(10)
                     .show(ui, |ui| {
-                        ui.set_width(300.0);
+                        ui.set_width(318.0);
                         self.inspector_contents(ui);
                     });
             });
@@ -381,17 +393,17 @@ impl OrionApp {
         egui::Grid::new("xform").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
             ui.label(RichText::new("Position").color(Color32::from_gray(80)));
             for v in p.iter_mut() {
-                moved |= ui.add(DragValue::new(v).speed(0.1).max_decimals(2)).changed();
+                moved |= ui.add(len_field(v)).changed();
             }
             ui.end_row();
             ui.label(RichText::new("Size").color(Color32::from_gray(80)));
             for (i, v) in s.iter_mut().enumerate() {
-                if ui.add(DragValue::new(v).speed(0.1).range(0.01..=10000.0).max_decimals(2)).changed() {
+                if ui.add(len_field(v).range(0.01..=1_000_000.0)).changed() {
                     resized = Some(i);
                 }
             }
             ui.end_row();
-            ui.label("");
+            ui.label(RichText::new(crate::units::current().suffix()).size(11.0).color(Color32::from_gray(130)));
             for l in ["X / W", "Y / L", "Z / H"] {
                 ui.label(RichText::new(l).size(11.0).color(Color32::from_gray(130)));
             }

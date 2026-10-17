@@ -45,7 +45,7 @@ impl Feature {
 }
 
 pub fn mm(v: f64) -> String {
-    format!("{:.2} mm", v)
+    crate::units::fmt(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +290,5 @@ pub fn measure(f1: &Feature, f2: &Feature) -> Result2 {
 }
 
 fn fmt_signed(v: f64) -> String {
-    let v = if v.abs() < 0.005 { 0.0 } else { v };
-    format!("{v:+.2}")
+    crate::units::signed(v)
 }

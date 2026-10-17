@@ -486,16 +486,34 @@ impl Node {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Snap grid in mm (0 = off).
     pub snap: f64,
     /// Workplane size in mm (X, Y).
     pub workplane: [f64; 2],
+    /// Printer preset name the workplane came from (display only).
+    pub preset: String,
+    pub units: crate::units::Units,
+    /// 1, 10 or 1000 for metric (mm, cm, m); 1 or 12 for imperial (in, ft).
+    pub scale: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { snap: 1.0, workplane: [200.0, 200.0] }
+        Settings {
+            snap: 1.0,
+            workplane: [300.0, 300.0],
+            preset: crate::units::PRESETS[0].0.to_string(),
+            units: crate::units::Units::Metric,
+            scale: 1,
+        }
+    }
+}
+
+impl Settings {
+    pub fn unit(&self) -> crate::units::Unit {
+        crate::units::unit_for(self.units, self.scale)
     }
 }
 
