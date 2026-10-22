@@ -53,6 +53,8 @@ pub struct OrionApp {
     pub dim_rects: Vec<egui::Rect>,
     pub dim_text: [Option<String>; 3],
     pub dim_focused: Option<usize>,
+    pub place_cache: crate::place::AdjCache,
+    pub cruise_off_key: bool,
     pub dim_select_all: Option<usize>,
     pub dim_sel: Vec<NodeId>,
     settings_open: bool,
@@ -103,6 +105,8 @@ impl OrionApp {
             dim_rects: Vec::new(),
             dim_text: [None, None, None],
             dim_focused: None,
+            place_cache: Default::default(),
+            cruise_off_key: false,
             dim_select_all: None,
             dim_sel: Vec::new(),
             settings_open: false,
@@ -370,6 +374,17 @@ impl OrionApp {
         let at = DVec3::new(ops::snap(at.x, s), ops::snap(at.y, s), at.z);
         let mut node = self.doc.new_shape(kind, at);
         node.hole = hole;
+        self.selection = vec![node.id];
+        self.tool = Tool::Select;
+        self.doc.nodes.push(node);
+    }
+
+    /// Add a library shape with a full placement transform (e.g. standing on
+    /// another shape's face).
+    pub fn add_shape_at(&mut self, kind: ShapeKind, hole: bool, transform: DMat4) {
+        let mut node = self.doc.new_shape(kind, DVec3::ZERO);
+        node.hole = hole;
+        node.transform = crate::doc::Xform(transform);
         self.selection = vec![node.id];
         self.tool = Tool::Select;
         self.doc.nodes.push(node);
@@ -1004,6 +1019,12 @@ impl OrionApp {
                         label(ui, "Show grid");
                         prefs_changed |= ui.checkbox(&mut self.prefs.show_grid, "").changed();
                         ui.end_row();
+                        label(ui, "Cruise when adding new shapes");
+                        prefs_changed |= ui
+                            .checkbox(&mut self.prefs.cruise, "")
+                            .on_hover_text("New shapes land on the face under the cursor (hold C to use the workplane)")
+                            .changed();
+                        ui.end_row();
                         label(ui, "Zoom speed");
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Slow").size(11.0));
@@ -1203,6 +1224,7 @@ impl eframe::App for OrionApp {
         }
 
         units::set(self.doc.settings.unit());
+        self.cruise_off_key = !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_down(Key::C) && i.modifiers.is_none());
         self.make_thumbnails(frame);
         self.shortcuts(&ctx);
 

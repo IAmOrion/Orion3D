@@ -10,6 +10,7 @@ mod library;
 mod measure;
 mod meshio;
 mod ops;
+mod place;
 mod prefs;
 mod render;
 mod units;

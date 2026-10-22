@@ -7,6 +7,7 @@ use crate::geom::{self, Item};
 use crate::icons;
 use crate::measure::{self, Feature};
 use crate::ops;
+use crate::place;
 use crate::render::{DrawItem, SceneParams};
 use crate::units;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2};
@@ -120,6 +121,16 @@ struct Hit {
     point: DVec3,
     normal: DVec3,
     t: f64,
+    /// Index into the items slice, and the triangle hit.
+    item: usize,
+    tri: usize,
+}
+
+/// Where a shape being dragged in from the library would land.
+pub struct Placement {
+    pub transform: DMat4,
+    pub face: Option<place::Face>,
+    pub snapped_centre: bool,
 }
 
 fn axis_basis(axis: usize) -> (DVec3, DVec3, DVec3) {
@@ -210,7 +221,7 @@ impl OrionApp {
     fn pick_items(&self, items: &[Item], v: &View, p: Pos2) -> Option<Hit> {
         let (o, d) = self.ray(v, p);
         let mut best: Option<Hit> = None;
-        for it in items {
+        for (idx, it) in items.iter().enumerate() {
             let inv = it.model.inverse();
             let lo = inv.transform_point3(o).as_vec3();
             let ld = inv.transform_vector3(d).as_vec3();
@@ -220,7 +231,7 @@ impl OrionApp {
                     let tp = &it.mesh.positions[tri * 3..tri * 3 + 3];
                     let ln = (tp[1] - tp[0]).cross(tp[2] - tp[0]).as_dvec3();
                     let normal = inv.transpose().transform_vector3(ln).normalize_or_zero();
-                    best = Some(Hit { node: it.node, point: o + d * t, normal, t });
+                    best = Some(Hit { node: it.node, point: o + d * t, normal, t, item: idx, tri });
                 }
             }
         }
@@ -407,10 +418,18 @@ impl OrionApp {
         let hovered_handle = if response.hovered() { pointer.and_then(|p| Self::hit_handle(&handles, p)) } else { None };
 
         // Drop from the shape library.
+        // Shape being dragged in from the library: work out where it lands
+        // (on the face under the cursor, or the workplane) for the preview.
+        let mut incoming: Option<((ShapeKind, bool), Placement)> = None;
+        if let (Some(entry), Some(p)) = (response.dnd_hover_payload::<(ShapeKind, bool)>(), pointer) {
+            let pl = self.placement(&items, &v, p);
+            incoming = Some((*entry, pl));
+        }
         if let Some(entry) = response.dnd_release_payload::<(ShapeKind, bool)>() {
             if let Some(p) = pointer {
-                let at = self.drop_point(&items, &v, p);
-                self.add_shape(entry.0, entry.1, Some(at));
+                let pl = self.placement(&items, &v, p);
+                self.add_shape_at(entry.0, entry.1, pl.transform);
+                incoming = None;
                 items = self.visible_items();
             }
         }
@@ -473,10 +492,19 @@ impl OrionApp {
         // ------------------------------------------------------------------
         // Render
         // ------------------------------------------------------------------
-        let ghosts = match (&self.tool, hovered_handle) {
+        let mut ghosts = match (&self.tool, hovered_handle) {
             (Tool::Align { .. }, Some(HandleKind::AlignDot(axis, which))) => self.align_preview(axis, which),
             _ => Vec::new(),
         };
+        if let Some(((kind, _), pl)) = &incoming {
+            let content = crate::doc::Content::Shape(kind.default_shape());
+            let (key, mesh) = self.cache.content_mesh(&content);
+            // Lift the preview a hair off the face so its base doesn't
+            // flicker against it.
+            let up = pl.transform.transform_vector3(DVec3::Z).normalize_or(DVec3::Z);
+            let lift = DMat4::from_translation(up * (self.camera.dist as f64 * 0.0006));
+            ghosts.push(Item { node: 0, key, mesh, model: lift * pl.transform, color: kind.default_color(), hole: false });
+        }
         self.render_scene(ui, frame, rect, &items, &ghosts, bounds);
 
         // ------------------------------------------------------------------
@@ -522,6 +550,10 @@ impl OrionApp {
             );
         }
         self.tool_banner(ui, rect);
+        if let Some((_, pl)) = &incoming {
+            self.draw_placement(&painter, &v, pl);
+            ui.ctx().request_repaint();
+        }
         self.dimensions(ui, &v, bounds, hovered_handle, pointer);
 
         self.view_controls(ui, rect);
@@ -569,6 +601,66 @@ impl OrionApp {
             }
         }
         self.camera.target
+    }
+
+    /// Where a new shape dropped at `p` goes: standing on the flat face
+    /// under the cursor (snapping to the face centre when close), or on the
+    /// workplane. Holding C, or turning Cruise off, always uses the workplane.
+    fn placement(&mut self, items: &[Item], v: &View, p: Pos2) -> Placement {
+        let snap = self.doc.settings.snap;
+        let grid = |q: DVec3| DVec3::new(ops::snap(q.x, snap), ops::snap(q.y, snap), q.z);
+        let force_plane = !self.prefs.cruise || self.cruise_off_key;
+        if !force_plane {
+            if let Some(h) = self.pick_items(items, v, p) {
+                let it = &items[h.item];
+                let adj = self.place_cache.get(it.key, &it.mesh);
+                if let Some(face) = place::face_at(&it.mesh, &adj, h.tri, &it.model) {
+                    let n = face.normal;
+                    let near_centre = self.project(v, face.centre).is_some_and(|c| c.distance(p) < 16.0);
+                    let at = if near_centre {
+                        face.centre
+                    } else if n.z > 0.9999 {
+                        // Flat, upward face: snap to the grid, stay on the face.
+                        DVec3::new(ops::snap(h.point.x, snap), ops::snap(h.point.y, snap), h.point.z)
+                    } else {
+                        h.point
+                    };
+                    return Placement { transform: place::standing_on(at, n), face: Some(face), snapped_centre: near_centre };
+                }
+                return Placement { transform: place::standing_on(h.point, h.normal), face: None, snapped_centre: false };
+            }
+        }
+        let at = grid(self.drop_point(&[], v, p));
+        Placement { transform: DMat4::from_translation(DVec3::new(at.x, at.y, 0.0)), face: None, snapped_centre: false }
+    }
+
+    fn draw_placement(&self, painter: &egui::Painter, v: &View, pl: &Placement) {
+        let green = Color32::from_rgb(0x2e, 0xd0, 0x3c);
+        if let Some(face) = &pl.face {
+            let fill = Color32::from_rgba_unmultiplied(0x2e, 0xd0, 0x3c, 70);
+            for t in &face.tris {
+                if let (Some(a), Some(b), Some(c)) = (self.project(v, t[0]), self.project(v, t[1]), self.project(v, t[2])) {
+                    painter.add(egui::Shape::convex_polygon(vec![a, b, c], fill, Stroke::NONE));
+                }
+            }
+            for e in &face.outline {
+                if let (Some(a), Some(b)) = (self.project(v, e[0]), self.project(v, e[1])) {
+                    painter.line_segment([a, b], Stroke::new(2.5, green));
+                }
+            }
+            if let Some(c) = self.project(v, face.centre) {
+                let r = if pl.snapped_centre { 5.0 } else { 3.0 };
+                painter.circle_filled(c, r, if pl.snapped_centre { green } else { Color32::from_gray(60) });
+            }
+        }
+        // Prompt, like Tinkercad.
+        let text = "Hold C to place shape on the Workplane";
+        let font = FontId::proportional(15.0);
+        let galley = painter.layout_no_wrap(text.to_string(), font, Color32::from_rgb(0x2e, 0x3a, 0x4a));
+        let r = Rect::from_min_size(v.rect.left_top() + vec2(70.0, 12.0), galley.size() + vec2(36.0, 16.0));
+        painter.rect_filled(r, r.height() * 0.5, Color32::WHITE);
+        painter.rect_stroke(r, r.height() * 0.5, Stroke::new(2.0, Color32::from_gray(225)), egui::StrokeKind::Inside);
+        painter.galley(r.min + vec2(18.0, 8.0), galley, Color32::from_rgb(0x2e, 0x3a, 0x4a));
     }
 
     fn drop_point(&self, items: &[Item], v: &View, p: Pos2) -> DVec3 {

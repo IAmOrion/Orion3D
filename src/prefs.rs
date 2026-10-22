@@ -16,11 +16,13 @@ pub struct Prefs {
     pub zoom_speed: u8,
     /// Workplane, units and scale for new designs ("Make default").
     pub new_design: Settings,
+    /// New shapes land on the face under the cursor.
+    pub cruise: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { show_grid: true, background: Rgb::hex(0xf3f5f8), zoom_speed: 5, new_design: Settings::default() }
+        Prefs { show_grid: true, background: Rgb::hex(0xf3f5f8), zoom_speed: 5, new_design: Settings::default(), cruise: true }
     }
 }
 

@@ -154,7 +154,10 @@ impl OrionApp {
         if resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             // Ghost of the shape under the cursor while dragging.
-            if let (Some(pos), Some(t)) = (ui.ctx().pointer_hover_pos(), thumb) {
+            // Only inside the library: over the 3D view the shape itself is
+            // previewed where it will land.
+            let panel_left = ui.clip_rect().left();
+            if let (Some(pos), Some(t)) = (ui.ctx().pointer_hover_pos().filter(|p| p.x > panel_left), thumb) {
                 let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("lib_drag_ghost"));
                 let r = egui::Rect::from_center_size(pos, vec2(64.0, 64.0));
                 ui.ctx().layer_painter(layer).image(t, r, full_uv(), Color32::from_white_alpha(200));
