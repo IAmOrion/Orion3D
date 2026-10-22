@@ -27,6 +27,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Orion3D")
+            .with_icon(std::sync::Arc::new(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon256.png")).unwrap_or_default(),
+            ))
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([900.0, 560.0]),
         renderer: eframe::Renderer::Wgpu,

@@ -40,7 +40,7 @@ The first build takes several minutes (it compiles the geometry kernel). Later b
 | Add a shape | Click it in the library (adds at the view centre) or drag it onto the workplane |
 | Select | Click; Shift+click to add/remove; drag on empty space for a box selection |
 | Move | Drag the object. Alt+drag moves a copy |
-| Resize | White corner squares (X+Y), black side squares (one axis), top square (height). Shift = uniform, Alt = about the centre. Hover a handle to see its dimensions; click a value, type a new size and press Enter (e.g. `35`, `1 1/2`, `2cm`, `0.5in`) |
+| Resize | White corner squares (X+Y), black side squares (one axis), top square (height). Shift = uniform, Alt = about the centre. Hover a handle to see its dimensions; they stay until you click elsewhere. Click a value, type a new size (e.g. `35`, `1 1/2`, `2cm`, `0.5in`) and press Enter, or Tab to accept it and move to the next value; Esc cancels. A handle only resizes once the mouse moves |
 | Seen from below | Viewing from underneath flips the handles: the height handle and lift cone move to the bottom and work downwards |
 | Raise / lower | Drag the black cone above the object |
 | Rotate | Drag a curved arrow. Snaps 22.5 deg; Shift = 45 deg, Ctrl = 1 deg; Alt rotates a copy |

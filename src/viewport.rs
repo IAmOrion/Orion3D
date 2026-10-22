@@ -78,7 +78,18 @@ pub enum Drag {
         delta: DVec3,
     },
     Lift { originals: ops::Originals, origin: DVec3, start_s: f64, delta: f64 },
-    Scale { originals: ops::Originals, kind: HandleKind, lo: DVec3, hi: DVec3, flip: bool },
+    Scale {
+        originals: ops::Originals,
+        kind: HandleKind,
+        lo: DVec3,
+        hi: DVec3,
+        flip: bool,
+        /// Where the mouse went down, and the ray through it. Movement is
+        /// measured from here, so grabbing a handle off-centre doesn't jump.
+        press: Pos2,
+        ray0: (DVec3, DVec3),
+        moved: bool,
+    },
     Rotate {
         originals: ops::Originals,
         axis: usize,
@@ -612,7 +623,18 @@ impl OrionApp {
                         applied: 0.0,
                     });
                 }
-                _ => self.drag = Some(Drag::Scale { originals, kind, lo, hi, flip: self.view_from_below(lo) }),
+                _ => {
+                    self.drag = Some(Drag::Scale {
+                        originals,
+                        kind,
+                        lo,
+                        hi,
+                        flip: self.view_from_below(lo),
+                        press: p,
+                        ray0: (o, d),
+                        moved: false,
+                    })
+                }
             }
             return;
         }
@@ -697,11 +719,21 @@ impl OrionApp {
                     ops::apply(&mut self.doc, originals, DMat4::from_translation(DVec3::Z * *dz), false);
                 }
             }
-            Drag::Scale { originals, kind, lo, hi, flip } => {
+            Drag::Scale { originals, kind, lo, hi, flip, press, ray0, moved } => {
+                // Nothing happens until the mouse has actually moved, so a
+                // click on a handle never resizes.
+                if !*moved && p.distance(*press) <= 3.0 {
+                    self.drag = Some(drag);
+                    return;
+                }
+                *moved = true;
                 let flip = *flip;
                 let (o, d) = self.ray(v, p);
+                let (o0, d0) = *ray0;
                 let zf = if flip { hi.z } else { lo.z };
                 let plane = DVec3::new(lo.x, lo.y, zf);
+                // Offset between the handle and the point actually grabbed.
+                let grab = |handle: DVec3| ray_plane(o0, d0, plane, DVec3::Z).map(|h0| handle - h0).unwrap_or(DVec3::ZERO);
                 let size = *hi - *lo;
                 let center = (*lo + *hi) * 0.5;
                 let min = if snap > 0.0 { snap } else { 0.1 };
@@ -713,7 +745,8 @@ impl OrionApp {
                 let mut anchor = *lo;
                 match *kind {
                     HandleKind::Corner(sx, sy) => {
-                        if let Some(h) = ray_plane(o, d, plane, DVec3::Z) {
+                        let corner = DVec3::new(if sx > 0 { hi.x } else { lo.x }, if sy > 0 { hi.y } else { lo.y }, zf);
+                        if let Some(h) = ray_plane(o, d, plane, DVec3::Z).map(|h| h + grab(corner)) {
                             anchor.x = if sx > 0 { lo.x } else { hi.x };
                             anchor.y = if sy > 0 { lo.y } else { hi.y };
                             let ax = if mods.alt { center.x } else { anchor.x };
@@ -726,7 +759,9 @@ impl OrionApp {
                         }
                     }
                     HandleKind::Side(axis, sign) => {
-                        if let Some(h) = ray_plane(o, d, plane, DVec3::Z) {
+                        let mut side = DVec3::new(center.x, center.y, zf);
+                        side[axis] = if sign > 0 { hi[axis] } else { lo[axis] };
+                        if let Some(h) = ray_plane(o, d, plane, DVec3::Z).map(|h| h + grab(side)) {
                             anchor[axis] = if sign > 0 { lo[axis] } else { hi[axis] };
                             anchor[1 - axis] = center[1 - axis];
                             let a = if mods.alt { center[axis] } else { anchor[axis] };
@@ -741,7 +776,14 @@ impl OrionApp {
                         let (az, dir) = if flip { (hi.z, -DVec3::Z) } else { (lo.z, DVec3::Z) };
                         anchor = DVec3::new(center.x, center.y, az);
                         let base = if mods.alt { center } else { anchor };
-                        if let Some(t) = line_param(base, dir, o, d) {
+                        // Distance from base to the handle, plus how far the
+                        // mouse has moved along the axis since it went down.
+                        let handle_t = (if flip { lo.z } else { hi.z } - base.z) * dir.z;
+                        let t = match (line_param(base, dir, o, d), line_param(base, dir, o0, d0)) {
+                            (Some(t), Some(t0)) => Some(handle_t + (t - t0)),
+                            _ => None,
+                        };
+                        if let Some(t) = t {
                             s.z = fit(t * k) / size.z.max(1e-9);
                             if mods.shift {
                                 s = DVec3::splat(s.z);
@@ -892,24 +934,32 @@ impl OrionApp {
         hovered: Option<HandleKind>,
         pointer: Option<Pos2>,
     ) {
+        let ctx = ui.ctx().clone();
         let resize = |k: Option<HandleKind>| k.filter(|k| matches!(k, HandleKind::Corner(..) | HandleKind::Side(..) | HandleKind::Top));
-        let editing = self.dim_text.iter().any(|t| t.is_some());
-        let in_box = pointer.is_some_and(|p| self.dim_rects.iter().any(|r| r.contains(p)));
+        let box_id = |axis: usize| egui::Id::unique(("dim_text", axis));
+        let focused_axis = (0..3).find(|a| ctx.memory(|m| m.has_focus(box_id(*a))));
         let dragging = match &self.drag {
             Some(Drag::Scale { kind, .. }) => Some(*kind),
             _ => None,
         };
-        self.dim_active = if self.tool != Tool::Select || self.selection_locked() {
-            None
+
+        // Like Tinkercad: hovering a resize handle shows its dimensions, and
+        // they stay until you click somewhere other than a value box.
+        let pressed = ctx.input(|i| i.pointer.any_pressed());
+        let in_box = pointer.is_some_and(|p| self.dim_rects.iter().any(|r| r.expand(2.0).contains(p)));
+        if self.tool != Tool::Select || self.selection_locked() || self.dim_sel != self.selection {
+            self.dim_active = None;
         } else if let Some(k) = resize(dragging) {
-            Some(k)
-        } else if let Some(k) = resize(hovered) {
-            Some(k)
-        } else if editing || in_box {
-            self.dim_active
-        } else {
-            None
-        };
+            self.dim_active = Some(k);
+        } else if pressed && !in_box {
+            self.dim_active = None;
+        }
+        if focused_axis.is_none() && self.drag.is_none() {
+            if let Some(k) = resize(hovered) {
+                self.dim_active = Some(k);
+            }
+        }
+        self.dim_sel = self.selection.clone();
         self.dim_rects.clear();
         let (Some(kind), Some((lo, hi))) = (self.dim_active, bounds) else {
             self.dim_text = [None, None, None];
@@ -920,10 +970,6 @@ impl OrionApp {
         let col = Color32::from_gray(35);
         let st = Stroke::new(1.3, col);
         let mut boxes = Vec::new();
-        // Everything drawn counts as "still hovering", so the pointer can
-        // travel from the handle to a value box without the dimensions
-        // disappearing.
-        let mut zone: Vec<Pos2> = Vec::new();
         for (axis, a, b, dir, off) in self.dims_for(kind, lo, hi) {
             let ext = self.handle_gap() * 0.5;
             let (Some(a0), Some(b0), Some(a1), Some(b1), Some(a2), Some(b2)) = (
@@ -936,7 +982,6 @@ impl OrionApp {
             ) else {
                 continue;
             };
-            zone.extend([a0, b0, a2, b2]);
             painter.line_segment([a0, a2], st);
             painter.line_segment([b0, b2], st);
             if a1.distance(b1) > 6.0 {
@@ -945,19 +990,21 @@ impl OrionApp {
             // Value box beyond the dimension line, pushed outward on screen.
             let mid = a1.lerp(b1, 0.5);
             let outward = (a2.lerp(b2, 0.5) - mid).normalized();
-            let at = mid + outward * 34.0;
-            zone.push(at);
-            boxes.push((axis, at, hi[axis] - lo[axis]));
+            boxes.push((axis, mid + outward * 34.0, hi[axis] - lo[axis]));
         }
 
+        let order: Vec<usize> = boxes.iter().map(|b| b.0).collect();
+        let mut sizes_changed = false;
+        let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
         let mut apply: Option<(usize, f64)> = None;
+        let mut now_focused = None;
         for (axis, at, size) in boxes {
-            let id = egui::Id::unique(("dim_box", axis));
-            let resp = egui::Area::new(id)
+            let resp = egui::Area::new(egui::Id::unique(("dim_box", axis)))
                 .fixed_pos(at)
                 .pivot(Align2::CENTER_CENTER)
                 .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
+                .show(&ctx, |ui| {
                     egui::Frame::new()
                         .fill(Color32::WHITE)
                         .corner_radius(4)
@@ -967,14 +1014,24 @@ impl OrionApp {
                             let mut text = self.dim_text[axis].clone().unwrap_or_else(|| units::num(size));
                             let te = ui.add(
                                 egui::TextEdit::singleline(&mut text)
-                                    .id(egui::Id::unique(("dim_text", axis)))
+                                    .id(box_id(axis))
                                     .font(FontId::proportional(16.0))
                                     .frame(egui::Frame::NONE)
                                     .align(egui::Align2::CENTER_CENTER)
+                                    .lock_focus(true)
                                     .desired_width(70.0),
                             );
                             if te.gained_focus() {
-                                // Select everything so typing replaces it.
+                                self.dim_select_all = Some(axis);
+                            }
+                            if te.has_focus() && self.dim_select_all == Some(axis) {
+                                // Select everything so typing replaces it. Keep
+                                // doing so until the click that focused the box
+                                // is over, or the click would place the cursor.
+                                let settled = ui.input(|i| !i.pointer.any_down() && !i.pointer.any_released());
+                                if settled {
+                                    self.dim_select_all = None;
+                                }
                                 let mut st = egui::text_edit::TextEditState::load(ui.ctx(), te.id).unwrap_or_default();
                                 let r = egui::text::CCursorRange::two(
                                     egui::text::CCursor::new(0),
@@ -984,12 +1041,17 @@ impl OrionApp {
                                 st.store(ui.ctx(), te.id);
                             }
                             if te.has_focus() {
+                                now_focused = Some(axis);
                                 self.dim_text[axis] = Some(text.clone());
                             }
                             if te.lost_focus() {
-                                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                // Enter or clicking away keeps the typed
+                                // value; only Esc throws it away.
+                                if !escape {
                                     if let Some(mm) = units::parse(&text) {
-                                        apply = Some((axis, mm));
+                                        if (mm - size).abs() > 1e-9 {
+                                            apply = Some((axis, mm));
+                                        }
                                     }
                                 }
                                 self.dim_text[axis] = None;
@@ -998,8 +1060,33 @@ impl OrionApp {
                 });
             self.dim_rects.push(resp.response.rect);
         }
-        if !zone.is_empty() {
-            self.dim_rects.push(Rect::from_points(&zone).expand(24.0));
+        self.dim_focused = now_focused;
+        // Tab / Shift+Tab commit the value and move to the next box of this
+        // handle (wrapping round). Handled after the boxes have taken this
+        // frame's typing, so fast typing followed by Tab isn't lost. The
+        // boxes lock focus so egui's own Tab navigation doesn't wander off.
+        let tab = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+        let back_tab = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        if let (true, Some(cur)) = (tab || back_tab, now_focused.or(focused_axis)) {
+            if let Some(i) = order.iter().position(|a| *a == cur) {
+                let n = order.len();
+                let next = order[if back_tab { (i + n - 1) % n } else { (i + 1) % n }];
+                if let Some(t) = self.dim_text[cur].take() {
+                    if let Some(mm) = units::parse(&t) {
+                        if (mm - (hi[cur] - lo[cur])).abs() > 1e-9 {
+                            self.set_dimension(kind, cur, mm, lo, hi);
+                            sizes_changed = true;
+                        }
+                    }
+                }
+                self.dim_text = [None, None, None];
+                ctx.memory_mut(|m| m.request_focus(box_id(next)));
+                self.dim_select_all = Some(next);
+                ctx.request_repaint();
+            }
+        }
+        if sizes_changed {
+            return;
         }
         if let Some((axis, mm)) = apply {
             self.set_dimension(kind, axis, mm, lo, hi);

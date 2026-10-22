@@ -52,7 +52,11 @@ pub struct OrionApp {
     pub dim_active: Option<crate::viewport::HandleKind>,
     pub dim_rects: Vec<egui::Rect>,
     pub dim_text: [Option<String>; 3],
+    pub dim_focused: Option<usize>,
+    pub dim_select_all: Option<usize>,
+    pub dim_sel: Vec<NodeId>,
     settings_open: bool,
+    logo: Option<egui::TextureHandle>,
 
     pub renderer: Option<Renderer>,
     pub view_target: Option<Target>,
@@ -98,7 +102,11 @@ impl OrionApp {
             dim_active: None,
             dim_rects: Vec::new(),
             dim_text: [None, None, None],
+            dim_focused: None,
+            dim_select_all: None,
+            dim_sel: Vec::new(),
             settings_open: false,
+            logo: load_logo(&cc.egui_ctx),
             renderer,
             view_target: None,
             thumbs: HashMap::new(),
@@ -706,7 +714,7 @@ impl OrionApp {
             .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(egui::Margin::symmetric(12, 8)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    logo(ui);
+                    logo(ui, self.logo.as_ref());
                     ui.add_space(10.0);
                     let name = format!("{}{}", self.base_name(), if self.is_dirty() { " *" } else { "" });
                     egui::Frame::new()
@@ -1093,21 +1101,26 @@ impl OrionApp {
     }
 }
 
-/// Four coloured tiles, a nod to Tinkercad's logo.
-fn logo(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::hover());
-    let cols = [
-        Color32::from_rgb(0xe1, 0x35, 0x2d),
-        Color32::from_rgb(0xf2, 0x8c, 0x28),
-        Color32::from_rgb(0x2d, 0x8a, 0xd6),
-        Color32::from_rgb(0x47, 0xa8, 0x3f),
-    ];
-    for (i, c) in cols.iter().enumerate() {
-        let x = rect.min.x + (i % 2) as f32 * 13.0;
-        let y = rect.min.y + (i / 2) as f32 * 13.0;
-        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(x, y), vec2(12.0, 12.0)), 1.5, *c);
+/// App logo plus name in the header.
+fn logo(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>) {
+    let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::hover());
+    if let Some(t) = tex {
+        ui.painter().image(
+            t.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
     ui.label(RichText::new("ORION3D").strong().size(15.0).color(Color32::from_gray(40)));
+}
+
+fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let img = image::load_from_memory_with_format(include_bytes!("../assets/icon256.png"), image::ImageFormat::Png).ok()?;
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+    Some(ctx.load_texture("orion3d_logo", color, egui::TextureOptions::LINEAR))
 }
 
 fn setup_style(ctx: &egui::Context) {
