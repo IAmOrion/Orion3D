@@ -55,6 +55,8 @@ pub struct OrionApp {
     pub dim_focused: Option<usize>,
     pub place_cache: crate::place::AdjCache,
     pub cruise_off_key: bool,
+    /// Library shape picked up with a click, waiting to be placed.
+    pub carrying: Option<(ShapeKind, bool)>,
     pub dim_select_all: Option<usize>,
     pub dim_sel: Vec<NodeId>,
     settings_open: bool,
@@ -107,6 +109,7 @@ impl OrionApp {
             dim_focused: None,
             place_cache: Default::default(),
             cruise_off_key: false,
+            carrying: None,
             dim_select_all: None,
             dim_sel: Vec::new(),
             settings_open: false,
@@ -364,20 +367,6 @@ impl OrionApp {
     // -----------------------------------------------------------------------
     // Edit commands
     // -----------------------------------------------------------------------
-
-    pub fn add_shape(&mut self, kind: ShapeKind, hole: bool, at: Option<DVec3>) {
-        let at = at.unwrap_or_else(|| {
-            let t = self.camera.target.as_dvec3();
-            DVec3::new(t.x, t.y, 0.0)
-        });
-        let s = self.doc.settings.snap;
-        let at = DVec3::new(ops::snap(at.x, s), ops::snap(at.y, s), at.z);
-        let mut node = self.doc.new_shape(kind, at);
-        node.hole = hole;
-        self.selection = vec![node.id];
-        self.tool = Tool::Select;
-        self.doc.nodes.push(node);
-    }
 
     /// Add a library shape with a full placement transform (e.g. standing on
     /// another shape's face).
@@ -661,7 +650,9 @@ impl OrionApp {
             self.delete_selection();
         }
         if hit(sc(plain, Key::Escape)) {
-            if self.tool != Tool::Select {
+            if self.carrying.is_some() {
+                self.carrying = None;
+            } else if self.tool != Tool::Select {
                 self.tool = Tool::Select;
             } else {
                 self.selection.clear();

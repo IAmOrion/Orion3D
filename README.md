@@ -37,7 +37,7 @@ The first build takes several minutes (it compiles the geometry kernel). Later b
 
 | Action | How |
 |---|---|
-| Add a shape | Click it in the library (adds at the view centre), or drag it into the view: it lands on whichever face is under the cursor (highlighted green), standing on that face, and snaps to the face's centre when close. Hold C to place it on the workplane instead. Can be turned off in Settings (Cruise) |
+| Add a shape | Click it in the library, then move over the view: it follows the mouse until you click again to place it (Esc cancels). Dragging it in also works. Either way it lands on whichever face is under the cursor (highlighted green), standing on that face, and snaps to the face's centre when close. Hold C to place it on the workplane instead. Can be turned off in Settings (Cruise) |
 | Select | Click; Shift+click to add/remove; drag on empty space for a box selection |
 | Move | Drag the object. Alt+drag moves a copy |
 | Resize | White corner squares (X+Y), black side squares (one axis), top square (height). Shift = uniform, Alt = about the centre. Hover a handle to see its dimensions; they stay until you click elsewhere. Click a value, type a new size (e.g. `35`, `1 1/2`, `2cm`, `0.5in`) and press Enter, or Tab to accept it and move to the next value; Esc cancels. A handle only resizes once the mouse moves |

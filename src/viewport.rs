@@ -425,6 +425,22 @@ impl OrionApp {
             let pl = self.placement(&items, &v, p);
             incoming = Some((*entry, pl));
         }
+        // A shape picked up with a click follows the mouse; the next left
+        // click in the view places it. Esc cancels.
+        let mut placed_carried = false;
+        if let (Some(entry), Some(p)) = (self.carrying, pointer.filter(|_| response.hovered())) {
+            if self.drag.is_none() || matches!(self.drag, Some(Drag::Orbit | Drag::Pan)) {
+                let pl = self.placement(&items, &v, p);
+                if pressed && primary_down && !mods.command && self.drag.is_none() {
+                    self.add_shape_at(entry.0, entry.1, pl.transform);
+                    self.carrying = None;
+                    placed_carried = true;
+                    items = self.visible_items();
+                } else {
+                    incoming = Some((entry, pl));
+                }
+            }
+        }
         if let Some(entry) = response.dnd_release_payload::<(ShapeKind, bool)>() {
             if let Some(p) = pointer {
                 let pl = self.placement(&items, &v, p);
@@ -434,7 +450,7 @@ impl OrionApp {
             }
         }
 
-        if pressed && response.hovered() && self.drag.is_none() {
+        if pressed && response.hovered() && self.drag.is_none() && !placed_carried {
             if let Some(p) = pointer {
                 if (secondary_down && mods.shift) || middle_down || (primary_down && mods.command && mods.shift) {
                     self.drag = Some(Drag::Pan);
@@ -478,7 +494,7 @@ impl OrionApp {
 
         // Hover.
         let can_hover = self.drag.is_none() && response.hovered() && hovered_handle.is_none();
-        self.hovered = if can_hover && self.tool != Tool::Measure {
+        self.hovered = if can_hover && self.tool != Tool::Measure && self.carrying.is_none() {
             pointer.and_then(|p| self.pick_items(&items, &v, p)).map(|h| h.node)
         } else {
             None
@@ -540,11 +556,11 @@ impl OrionApp {
             painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(43, 124, 233, 30));
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
         }
-        if self.doc.nodes.is_empty() {
+        if self.doc.nodes.is_empty() && incoming.is_none() {
             painter.text(
                 rect.center_top() + vec2(0.0, 40.0),
                 Align2::CENTER_TOP,
-                "Drag a shape from the right onto the workplane to begin",
+                "Click a shape on the right, then click on the workplane to place it",
                 FontId::proportional(15.0),
                 Color32::from_gray(120),
             );

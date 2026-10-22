@@ -130,7 +130,7 @@ impl OrionApp {
                     });
                     ui.add_space(10.0);
                     ui.label(
-                        RichText::new("Click to add at the centre of the view, or drag onto the workplane.")
+                        RichText::new("Click a shape, move over the workplane and click to place it (or drag it in). Esc cancels.")
                             .size(11.0)
                             .color(Color32::from_gray(120)),
                     );
@@ -164,7 +164,12 @@ impl OrionApp {
             }
         }
         if resp.clicked() {
-            self.add_shape(kind, hole, None);
+            // Like Tinkercad: a click picks the shape up; it follows the mouse
+            // over the view until you click again to place it.
+            self.carrying = if self.carrying == Some((kind, hole)) { None } else { Some((kind, hole)) };
+        }
+        if self.carrying == Some((kind, hole)) {
+            ui.painter().rect_stroke(rect, 6.0, (2.0, crate::viewport::ACCENT), egui::StrokeKind::Inside);
         }
     }
 }
