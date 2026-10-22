@@ -20,11 +20,31 @@ pub fn node_bounds_opt(cache: &mut GeomCache, node: &Node) -> Option<(DVec3, DVe
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn node_bounds(cache: &mut GeomCache, node: &Node) -> (DVec3, DVec3) {
     node_bounds_opt(cache, node).unwrap_or_else(|| {
         let o = node.transform.0.transform_point3(DVec3::ZERO);
         (o, o)
     })
+}
+
+/// Bounds in another frame: `pre` maps world to that frame.
+pub fn node_bounds_in(cache: &mut GeomCache, node: &Node, pre: &DMat4) -> Option<(DVec3, DVec3)> {
+    let mut out = None;
+    for it in cache.items_of(node) {
+        out = merge(out, world_bounds(&it.mesh, &(*pre * it.model)));
+    }
+    out
+}
+
+pub fn bounds_in(cache: &mut GeomCache, doc: &Document, ids: &[NodeId], pre: &DMat4) -> Option<(DVec3, DVec3)> {
+    let mut out = None;
+    for id in ids {
+        if let Some(n) = doc.get(*id) {
+            out = merge(out, node_bounds_in(cache, n, pre));
+        }
+    }
+    out
 }
 
 pub fn bounds_of(cache: &mut GeomCache, doc: &Document, ids: &[NodeId]) -> Option<(DVec3, DVec3)> {

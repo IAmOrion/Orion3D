@@ -96,6 +96,10 @@ pub struct SceneParams<'a> {
     pub extra_lines: &'a [LineVertex],
     /// Device pixels per UI point (outline thickness scales with it).
     pub ppp: f32,
+    /// Where the workplane is (identity = the default workplane).
+    pub plane_model: Mat4,
+    /// Tint the workplane to show a user workplane is active.
+    pub plane_custom: bool,
     /// Selection footprint on the floor (drawn translucent, under objects).
     pub footprint: Option<[Vec3; 4]>,
 }
@@ -607,9 +611,9 @@ impl Renderer {
         write(
             plane_slot,
             ObjUniform {
-                model: Mat4::IDENTITY.to_cols_array_2d(),
-                normal_mat: Mat4::IDENTITY.to_cols_array_2d(),
-                color: [0.86, 0.92, 0.98, 1.0],
+                model: scene.plane_model.to_cols_array_2d(),
+                normal_mat: scene.plane_model.inverse().transpose().to_cols_array_2d(),
+                color: if scene.plane_custom { [0.99, 0.80, 0.55, 0.30] } else { [0.86, 0.92, 0.98, 1.0] },
                 flags: [0.0, 0.0, 0.0, 1.0],
                 ids: [0; 4],
             },
@@ -693,14 +697,14 @@ impl Renderer {
 
             // Workplane (only from above) and grid.
             if let (Some(pl), true) = (&self.plane, scene.workplane.is_some()) {
-                if scene.eye.z > 0.0 {
+                if !scene.plane_custom && scene.plane_model.inverse().transform_point3(scene.eye).z > 0.0 {
                     pass.set_bind_group(1, &self.obj_bg, &[off(plane_slot)]);
                     pass.set_vertex_buffer(0, pl.quad.slice(..));
                     pass.draw(0..6, 0..1);
                 }
                 if scene.grid.is_some() {
                     pass.set_pipeline(&self.line_pipe);
-                    pass.set_bind_group(1, &self.obj_bg, &[0]);
+                    pass.set_bind_group(1, &self.obj_bg, &[off(plane_slot)]);
                     if scene.fine_grid {
                         pass.set_vertex_buffer(0, pl.minor.slice(..));
                         pass.draw(0..pl.minor_count, 0..1);
@@ -712,7 +716,7 @@ impl Renderer {
 
             if let Some(buf) = &extra_buf {
                 pass.set_pipeline(&self.line_pipe);
-                pass.set_bind_group(1, &self.obj_bg, &[0]);
+                pass.set_bind_group(1, &self.obj_bg, &[off(foot_slot)]);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..scene.extra_lines.len() as u32, 0..1);
             }
@@ -733,6 +737,12 @@ impl Renderer {
 
             // Holes last, translucent; the footprint first, under everything.
             pass.set_pipeline(&self.hole_pipe);
+            // A user workplane is see-through, so shapes behind it stay visible.
+            if let (Some(pl), true) = (&self.plane, scene.plane_custom && scene.workplane.is_some()) {
+                pass.set_bind_group(1, &self.obj_bg, &[off(plane_slot)]);
+                pass.set_vertex_buffer(0, pl.quad.slice(..));
+                pass.draw(0..6, 0..1);
+            }
             if let Some(buf) = &foot_buf {
                 pass.set_bind_group(1, &self.obj_bg, &[off(foot_slot)]);
                 pass.set_vertex_buffer(0, buf.slice(..));

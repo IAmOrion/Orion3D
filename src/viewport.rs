@@ -47,6 +47,8 @@ pub enum Tool {
     Align { key: Option<NodeId> },
     Mirror,
     Measure,
+    /// Click a face to make it the workplane; click empty space to reset.
+    Workplane,
 }
 
 #[derive(Default)]
@@ -193,15 +195,23 @@ const MEASURE: Color32 = Color32::from_rgb(0xf2, 0x7a, 0x12);
 const ARROW_GREY: Color32 = Color32::from_rgb(0x6b, 0x70, 0x78);
 
 impl OrionApp {
+    /// Project a workplane-space point to the screen.
     fn project(&self, v: &View, p: DVec3) -> Option<Pos2> {
         self.camera
-            .project(p.as_vec3(), v.aspect)
+            .project(self.wp.transform_point3(p).as_vec3(), v.aspect)
             .map(|uv| pos2(v.rect.min.x + uv[0] * v.rect.width(), v.rect.min.y + uv[1] * v.rect.height()))
     }
 
+    /// Ray through a screen point, in workplane space.
     fn ray(&self, v: &View, p: Pos2) -> (DVec3, DVec3) {
         let (o, d) = self.camera.ray(v.uv(p), v.aspect);
-        (o.as_dvec3(), d.as_dvec3())
+        let inv = self.wp_inv();
+        (inv.transform_point3(o.as_dvec3()), inv.transform_vector3(d.as_dvec3()).normalize())
+    }
+
+    /// Camera position in workplane space.
+    fn eye_f(&self) -> DVec3 {
+        self.wp_inv().transform_point3(self.camera.eye().as_dvec3())
     }
 
     /// Drawable items of all visible top-level nodes.
@@ -212,7 +222,9 @@ impl OrionApp {
                 continue;
             }
             let n = &self.doc.nodes[i];
-            self.cache.node_items(n.id, n, DMat4::IDENTITY, false, &mut items);
+            // Items live in workplane space while editing.
+            let inv = self.wp.inverse();
+            self.cache.node_items(n.id, n, inv, false, &mut items);
         }
         items
     }
@@ -240,7 +252,7 @@ impl OrionApp {
 
     /// True when the camera is below the selection, so handles flip.
     pub fn view_from_below(&self, lo: DVec3) -> bool {
-        (self.camera.eye().z as f64) < lo.z
+        self.eye_f().z < lo.z
     }
 
     fn handle_gap(&self) -> f64 {
@@ -276,7 +288,7 @@ impl OrionApp {
         let (n, _, _) = axis_basis(axis);
         let r = (anchor - center).normalize_or(DVec3::X);
         let t = n.cross(r);
-        let eye = self.camera.eye().as_dvec3();
+        let eye = self.eye_f();
         let wpp = 2.0 * eye.distance(anchor) * (self.camera.fov_y as f64 * 0.5).tan() / v.rect.height().max(1.0) as f64;
         let rg = 15.0 * wpp;
         let q = anchor - r * rg;
@@ -348,6 +360,7 @@ impl OrionApp {
                     }
                 }
             }
+            Tool::Workplane => {}
             Tool::Mirror => {
                 let spots = [
                     DVec3::new(hi.x + g * 1.6, c.y, lo.z),
@@ -399,7 +412,7 @@ impl OrionApp {
         }
 
         let mut items = self.visible_items();
-        let mut bounds = ops::bounds_of(&mut self.cache, &self.doc, &self.selection);
+        let mut bounds = self.bounds_f(&self.selection.clone());
         let mut handles = self.handle_bounds(bounds).map(|(lo, hi)| self.compute_handles(&v, lo, hi)).unwrap_or_default();
 
         // ------------------------------------------------------------------
@@ -432,7 +445,7 @@ impl OrionApp {
             if self.drag.is_none() || matches!(self.drag, Some(Drag::Orbit | Drag::Pan)) {
                 let pl = self.placement(&items, &v, p);
                 if pressed && primary_down && !mods.command && self.drag.is_none() {
-                    self.add_shape_at(entry.0, entry.1, pl.transform);
+                    self.add_shape_at(entry.0, entry.1, self.wp * pl.transform);
                     self.carrying = None;
                     placed_carried = true;
                     items = self.visible_items();
@@ -444,7 +457,7 @@ impl OrionApp {
         if let Some(entry) = response.dnd_release_payload::<(ShapeKind, bool)>() {
             if let Some(p) = pointer {
                 let pl = self.placement(&items, &v, p);
-                self.add_shape_at(entry.0, entry.1, pl.transform);
+                self.add_shape_at(entry.0, entry.1, self.wp * pl.transform);
                 incoming = None;
                 items = self.visible_items();
             }
@@ -460,6 +473,7 @@ impl OrionApp {
                     match self.tool.clone() {
                         Tool::Measure => self.measure_click(&items, &v, p),
                         Tool::Align { .. } | Tool::Mirror => self.tool_click(&items, &v, p, hovered_handle),
+                        Tool::Workplane => self.workplane_click(&items, &v, p),
                         Tool::Select => self.begin_primary(&items, &v, p, hovered_handle, bounds, mods),
                     }
                 }
@@ -488,7 +502,7 @@ impl OrionApp {
         // Recompute after edits so drawing reflects this frame.
         if self.drag.is_some() || pressed || released {
             items = self.visible_items();
-            bounds = ops::bounds_of(&mut self.cache, &self.doc, &self.selection);
+            bounds = self.bounds_f(&self.selection.clone());
             handles = self.handle_bounds(bounds).map(|(lo, hi)| self.compute_handles(&v, lo, hi)).unwrap_or_default();
         }
 
@@ -502,6 +516,12 @@ impl OrionApp {
         if self.tool == Tool::Measure {
             self.measure.hover = if can_hover { pointer.and_then(|p| self.measure_pick(&items, &v, p)) } else { None };
         }
+
+        let wp_preview = if self.tool == Tool::Workplane && can_hover {
+            pointer.and_then(|p| self.workplane_target(&items, &v, p))
+        } else {
+            None
+        };
 
         self.set_cursor(&ctx, hovered_handle);
 
@@ -550,6 +570,9 @@ impl OrionApp {
         }
         if self.tool == Tool::Measure {
             self.draw_measure(&painter, &v);
+        }
+        if let Some((face, frame)) = &wp_preview {
+            self.draw_workplane_preview(&painter, &v, face, frame);
         }
         if let (Some(Drag::Marquee { start, .. }), Some(p)) = (&self.drag, pointer) {
             let r = Rect::from_two_pos(*start, p);
@@ -608,12 +631,12 @@ impl OrionApp {
 
     fn zoom_point(&self, items: &[Item], v: &View, p: Pos2) -> Vec3 {
         if let Some(h) = self.pick_items(items, v, p) {
-            return h.point.as_vec3();
+            return self.wp.transform_point3(h.point).as_vec3();
         }
         let (o, d) = self.ray(v, p);
         if let Some(h) = ray_plane(o, d, DVec3::ZERO, DVec3::Z) {
             if h.distance(o) < self.camera.dist as f64 * 6.0 {
-                return h.as_vec3();
+                return self.wp.transform_point3(h).as_vec3();
             }
         }
         self.camera.target
@@ -794,7 +817,7 @@ impl OrionApp {
         // Plane seen edge-on: fall back to the screen-space angle.
         let c = self.project(v, center)?;
         let a = (p.y - c.y).atan2(p.x - c.x) as f64;
-        let toward = (self.camera.eye().as_dvec3() - center).dot(n).signum();
+        let toward = (self.eye_f() - center).dot(n).signum();
         Some(-a * toward)
     }
 
@@ -816,7 +839,7 @@ impl OrionApp {
                         let limit = self.camera.dist as f64 * 4.0;
                         dd = dd.clamp(DVec3::splat(-limit), DVec3::splat(limit));
                         *dv = dd;
-                        ops::apply(&mut self.doc, originals, DMat4::from_translation(dd), false);
+                        self.apply_f(originals, DMat4::from_translation(dd), false);
                     }
                 }
             }
@@ -824,7 +847,7 @@ impl OrionApp {
                 let (o, d) = self.ray(v, p);
                 if let Some(s) = line_param(*origin, DVec3::Z, o, d) {
                     *dz = ops::snap(s - *start_s, snap);
-                    ops::apply(&mut self.doc, originals, DMat4::from_translation(DVec3::Z * *dz), false);
+                    self.apply_f(originals, DMat4::from_translation(DVec3::Z * *dz), false);
                 }
             }
             Drag::Scale { originals, kind, lo, hi, flip, press, ray0, moved } => {
@@ -906,7 +929,7 @@ impl OrionApp {
                     // Uniform scale keeps the handle face where it is.
                     anchor.z = if flip { hi.z } else { lo.z };
                 }
-                ops::apply(&mut self.doc, originals, ops::scale_about(anchor, s), true);
+                self.apply_f(originals, ops::scale_about(anchor, s), true);
             }
             Drag::Rotate { originals, axis, pivot, ring, last, total, applied, .. } => {
                 let (n, _, _) = axis_basis(*axis);
@@ -923,7 +946,7 @@ impl OrionApp {
                     let snapped = ops::snap(total.to_degrees(), step).to_radians();
                     if (snapped - *applied).abs() > 1e-9 {
                         *applied = snapped;
-                        ops::apply(&mut self.doc, originals, ops::rotate_about(*pivot, n, snapped), true);
+                        self.apply_f(originals, ops::rotate_about(*pivot, n, snapped), true);
                     }
                 }
             }
@@ -995,7 +1018,7 @@ impl OrionApp {
         let g = self.handle_gap() * 1.3;
         let flip = self.view_from_below(lo);
         let zf = if flip { hi.z } else { lo.z };
-        let eye = self.camera.eye().as_dvec3();
+        let eye = self.eye_f();
         let mut out = Vec::new();
         let mut along = |axis: usize, other: usize, side: f64| {
             let mut a = DVec3::new(lo.x, lo.y, zf);
@@ -1022,7 +1045,7 @@ impl OrionApp {
             HandleKind::Top => {
                 // Vertical, off to the right of the selection as seen on screen.
                 let view = self.camera.view();
-                let r = view.row(0).truncate().as_dvec3();
+                let r = self.wp_inv().transform_vector3(view.row(0).truncate().as_dvec3());
                 let r = DVec3::new(r.x, r.y, 0.0).normalize_or(DVec3::X);
                 let half = ((hi - lo) * 0.5).abs().dot(r.abs());
                 let a = DVec3::new(c.x, c.y, lo.z);
@@ -1222,8 +1245,76 @@ impl OrionApp {
         f[axis] = new_size / size;
         let ids: Vec<NodeId> = self.selection.iter().copied().filter(|id| self.doc.get(*id).is_some_and(|n| !n.locked)).collect();
         let orig = ops::originals(&self.doc, &ids);
-        ops::apply(&mut self.doc, &orig, ops::scale_about(anchor, f), true);
+        self.apply_f(&orig, ops::scale_about(anchor, f), true);
     }
+
+    // ----------------------------------------------------------------------
+    // Workplane tool
+    // ----------------------------------------------------------------------
+
+    /// Face under the cursor and the workplane frame (in current workplane
+    /// space) that clicking would create: origin at the click point (or the
+    /// face centre when close), Z out of the face.
+    fn workplane_target(&mut self, items: &[Item], v: &View, p: Pos2) -> Option<(place::Face, DMat4)> {
+        let h = self.pick_items(items, v, p)?;
+        let it = &items[h.item];
+        let adj = self.place_cache.get(it.key, &it.mesh);
+        let face = place::face_at(&it.mesh, &adj, h.tri, &it.model)?;
+        let near_centre = self.project(v, face.centre).is_some_and(|c| c.distance(p) < 16.0);
+        let origin = if near_centre { face.centre } else { h.point };
+        let z = face.normal.normalize();
+        // Keep X as close to the current X as possible.
+        let mut x = DVec3::X - z * z.dot(DVec3::X);
+        if x.length_squared() < 1e-6 {
+            x = DVec3::Y - z * z.dot(DVec3::Y);
+        }
+        let x = x.normalize();
+        let y = z.cross(x);
+        let frame = DMat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), origin.extend(1.0));
+        Some((face, frame))
+    }
+
+    fn workplane_click(&mut self, items: &[Item], v: &View, p: Pos2) {
+        match self.workplane_target(items, v, p) {
+            Some((_, frame)) => self.wp = self.wp * frame,
+            None => self.reset_workplane(),
+        }
+        self.tool = Tool::Select;
+    }
+
+    fn draw_workplane_preview(&self, painter: &egui::Painter, v: &View, face: &place::Face, frame: &DMat4) {
+        let orange = Color32::from_rgb(0xf2, 0x8c, 0x28);
+        let fill = Color32::from_rgba_unmultiplied(0xf2, 0x8c, 0x28, 60);
+        for t in &face.tris {
+            if let (Some(a), Some(b), Some(c)) = (self.project(v, t[0]), self.project(v, t[1]), self.project(v, t[2])) {
+                painter.add(egui::Shape::convex_polygon(vec![a, b, c], fill, Stroke::NONE));
+            }
+        }
+        for e in &face.outline {
+            if let (Some(a), Some(b)) = (self.project(v, e[0]), self.project(v, e[1])) {
+                painter.line_segment([a, b], Stroke::new(2.5, orange));
+            }
+        }
+        // Little grid square and axes at the new origin.
+        let s = self.handle_gap() * 1.5;
+        let at = |x: f64, y: f64, z: f64| self.project(v, frame.transform_point3(DVec3::new(x, y, z)));
+        let grid = Stroke::new(1.0, orange);
+        for i in -2..=2 {
+            let f = i as f64 * s * 0.5;
+            if let (Some(a), Some(b)) = (at(f, -s, 0.0), at(f, s, 0.0)) {
+                painter.line_segment([a, b], grid);
+            }
+            if let (Some(a), Some(b)) = (at(-s, f, 0.0), at(s, f, 0.0)) {
+                painter.line_segment([a, b], grid);
+            }
+        }
+        if let (Some(o), Some(x), Some(y), Some(z)) = (at(0.0, 0.0, 0.0), at(s, 0.0, 0.0), at(0.0, s, 0.0), at(0.0, 0.0, s)) {
+            painter.line_segment([o, x], Stroke::new(2.5, Color32::from_rgb(0xe1, 0x35, 0x2d)));
+            painter.line_segment([o, y], Stroke::new(2.5, Color32::from_rgb(0x47, 0xa8, 0x3f)));
+            painter.line_segment([o, z], Stroke::new(2.5, Color32::from_rgb(0x2d, 0x8a, 0xd6)));
+        }
+    }
+
 
     // ----------------------------------------------------------------------
     // Align and Mirror tools
@@ -1260,7 +1351,7 @@ impl OrionApp {
     /// otherwise the whole selection.
     fn handle_bounds(&mut self, sel: Option<(DVec3, DVec3)>) -> Option<(DVec3, DVec3)> {
         match self.tool {
-            Tool::Align { key: Some(k) } => ops::bounds_of(&mut self.cache, &self.doc, &[k]).or(sel),
+            Tool::Align { key: Some(k) } => self.bounds_f(&[k]).or(sel),
             _ => sel,
         }
     }
@@ -1268,7 +1359,7 @@ impl OrionApp {
     /// How far each selected (unpinned, unlocked) object moves for an align.
     fn align_deltas(&mut self, axis: usize, which: usize) -> Vec<(NodeId, DVec3)> {
         let key = if let Tool::Align { key } = self.tool { key } else { None };
-        let sel = ops::bounds_of(&mut self.cache, &self.doc, &self.selection);
+        let sel = self.bounds_f(&self.selection.clone());
         let Some((rlo, rhi)) = self.handle_bounds(sel) else { return Vec::new() };
         let target = [rlo[axis], (rlo[axis] + rhi[axis]) * 0.5, rhi[axis]][which];
         let mut out = Vec::new();
@@ -1280,7 +1371,7 @@ impl OrionApp {
             if n.locked {
                 continue;
             }
-            let (lo, hi) = ops::node_bounds(&mut self.cache, &n);
+            let (lo, hi) = self.node_bounds_f(&n);
             let cur = [lo[axis], (lo[axis] + hi[axis]) * 0.5, hi[axis]][which];
             let mut d = DVec3::ZERO;
             d[axis] = target - cur;
@@ -1342,6 +1433,7 @@ impl OrionApp {
             Tool::Align { key: Some(_) } => "Shapes align to the pinned shape. Click it again to unpin. Esc to finish",
             Tool::Mirror => "Mirror: click an arrow to flip the selection along that axis. Esc to finish.",
             Tool::Measure => "Measure: click an edge, circle or face, then a second one. Right-drag to orbit. Esc to finish.",
+            Tool::Workplane => "Click a face to place the Workplane on it. Click empty space to reset it",
         };
         let p = ui.painter_at(rect);
         let font = FontId::proportional(15.0);
@@ -1373,7 +1465,7 @@ impl OrionApp {
     /// otherwise the flat face under the cursor.
     fn measure_pick(&mut self, items: &[Item], v: &View, p: Pos2) -> Option<Feature> {
         let hit = self.pick_items(items, v, p);
-        let eye = self.camera.eye().as_dvec3();
+        let eye = self.eye_f();
         let tol = self.camera.dist as f64 * 0.01 + 0.05;
         let mut best: Option<(f32, Feature)> = None;
         for it in items {
@@ -1552,7 +1644,7 @@ impl OrionApp {
                 DrawItem {
                     key: it.key,
                     mesh: it.mesh.clone(),
-                    model: it.model.as_mat4(),
+                    model: (self.wp * it.model).as_mat4(),
                     color: [c.r(), c.g(), c.b(), 1.0],
                     hole: it.hole,
                     selected: self.tool != Tool::Measure && self.selection.contains(&it.node),
@@ -1567,7 +1659,7 @@ impl OrionApp {
             draw.push(DrawItem {
                 key: g.key,
                 mesh: g.mesh.clone(),
-                model: g.model.as_mat4(),
+                model: (self.wp * g.model).as_mat4(),
                 color: [c.r(), c.g(), c.b(), 1.0],
                 hole: false,
                 selected: false,
@@ -1583,13 +1675,9 @@ impl OrionApp {
         let wp = self.doc.settings.workplane;
         let (gmin, gmaj) = self.doc.settings.unit().grid();
         let footprint = bounds.filter(|_| self.tool != Tool::Measure).map(|(lo, hi)| {
-            let z = if self.view_from_below(lo) { hi.z } else { lo.z } as f32;
-            [
-                Vec3::new(lo.x as f32, lo.y as f32, z),
-                Vec3::new(hi.x as f32, lo.y as f32, z),
-                Vec3::new(hi.x as f32, hi.y as f32, z),
-                Vec3::new(lo.x as f32, hi.y as f32, z),
-            ]
+            let z = if self.view_from_below(lo) { hi.z } else { lo.z };
+            [(lo.x, lo.y), (hi.x, lo.y), (hi.x, hi.y), (lo.x, hi.y)]
+                .map(|(x, y)| self.wp.transform_point3(DVec3::new(x, y, z)).as_vec3())
         });
         let params = SceneParams {
             view_proj: self.camera.view_proj(aspect),
@@ -1603,6 +1691,8 @@ impl OrionApp {
             grid_fade: self.camera.dist * 0.9 * (gmin as f32).max(1.0),
             ppp,
             footprint,
+            plane_model: self.wp.as_mat4(),
+            plane_custom: self.wp != DMat4::IDENTITY,
         };
         let renderer = self.renderer.as_mut().unwrap();
         if self.view_target.is_none() {

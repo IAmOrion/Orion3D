@@ -57,7 +57,7 @@ The first build takes several minutes (it compiles the geometry kernel). Later b
 | Hole / Solid | H / S |
 | Lock or unlock | Ctrl+L |
 | Hide selected / Show all | Ctrl+H / Ctrl+Shift+H |
-| Align / Mirror / Measure | L / M / R |
+| Workplane / Align / Mirror / Measure | W / L / M / R |
 | Drop to workplane | D |
 | Fit view | F |
 | Nudge (1 grid step, Shift = x10) / Raise and lower | Arrows / Ctrl+Up, Ctrl+Down |
@@ -89,6 +89,7 @@ Select a group to switch its type in the inspector. Every group can be ungrouped
 ### Tools
 
 - **Align (L)**: with two or more objects selected, handles appear around the selection: front / middle / back, left / middle / right, and bottom / middle / top. Hovering a handle turns it red and shows a preview of where the shapes will go; clicking applies it. Click one of the selected shapes to pin it: the handles move onto that shape, and the others align to it while it stays put. Click it again to unpin.
+- **Workplane (W)**: hover a face to preview, click to move the workplane onto it (orange, see-through). New shapes, moving, handles, sizes, the snap grid and Drop (D) then all work relative to that face. Use W and click empty space to put the workplane back.
 - **Mirror (M)**: click an arrow to flip the selection along that axis.
 - **Measure (R)**: hover to see what will be picked. Click an edge, circle or flat face, then a second one. A single circle shows its radius and diameter. Two picks give the distance between them, e.g. the gap between two parallel edges of a notch, centre to centre of two holes, or face to face. It works on the finished shape, so nothing needs ungrouping.
 
@@ -120,7 +121,7 @@ The JSON is human-readable and diff-friendly. Files carry a format version; newe
 
 ## Roadmap
 
-- Workplane tool and ruler
+- Ruler
 - Multicolour unions
 - Text and more shapes
 - Windows installer with `.orion3d` file association

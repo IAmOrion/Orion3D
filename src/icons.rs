@@ -20,6 +20,7 @@ pub enum Icon {
     Align,
     Mirror,
     Measure,
+    Workplane,
     LockOpen,
     LockClosed,
     ChevronUp,
@@ -161,6 +162,16 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, col: Color32, accent: Color32)
         Icon::Mirror => {
             p.add(Shape::closed_line(vec![u.p(0.42, 0.14), u.p(0.42, 0.86), u.p(0.1, 0.86)], st));
             p.add(Shape::closed_line(vec![u.p(0.58, 0.14), u.p(0.58, 0.86), u.p(0.9, 0.86)], st));
+        }
+        Icon::Workplane => {
+            // A tilted grid square with a small upright axis.
+            let quad = vec![u.p(0.08, 0.66), u.p(0.5, 0.88), u.p(0.92, 0.66), u.p(0.5, 0.44)];
+            p.add(Shape::convex_polygon(quad.clone(), accent, Stroke::NONE));
+            p.add(Shape::closed_line(quad, st));
+            p.line_segment([u.p(0.29, 0.77), u.p(0.71, 0.55)], thin);
+            p.line_segment([u.p(0.29, 0.55), u.p(0.71, 0.77)], thin);
+            p.line_segment([u.p(0.5, 0.66), u.p(0.5, 0.14)], st);
+            p.circle_filled(u.p(0.5, 0.14), u.s(0.06), col);
         }
         Icon::Measure => {
             // Tape measure: round case with tape and tick marks.

@@ -382,7 +382,8 @@ impl OrionApp {
     }
 
     fn transform_fields(&mut self, ui: &mut egui::Ui) {
-        let Some((lo, hi)) = ops::bounds_of(&mut self.cache, &self.doc, &self.selection) else { return };
+        let sel = self.selection.clone();
+        let Some((lo, hi)) = self.bounds_f(&sel) else { return };
         let c = (lo + hi) * 0.5;
         let size = hi - lo;
 
@@ -420,7 +421,7 @@ impl OrionApp {
             let anchor = DVec3::new(c.x, c.y, lo.z);
             let ids: Vec<u64> = self.selection.clone();
             let orig = ops::originals(&self.doc, &ids);
-            ops::apply(&mut self.doc, &orig, ops::scale_about(anchor, f), true);
+            self.apply_f(&orig, ops::scale_about(anchor, f), true);
         }
     }
 }

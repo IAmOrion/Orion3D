@@ -66,6 +66,8 @@ impl OrionApp {
                     grid_fade: 1.0,
                     ppp,
                     footprint: None,
+                    plane_model: Mat4::IDENTITY,
+                    plane_custom: false,
                 },
             );
             self.thumbs.insert((kind, hole), id);

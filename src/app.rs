@@ -55,6 +55,8 @@ pub struct OrionApp {
     pub dim_focused: Option<usize>,
     pub place_cache: crate::place::AdjCache,
     pub cruise_off_key: bool,
+    /// The workplane (world from workplane). Identity = default workplane.
+    pub wp: DMat4,
     /// Library shape picked up with a click, waiting to be placed.
     pub carrying: Option<(ShapeKind, bool)>,
     pub dim_select_all: Option<usize>,
@@ -110,6 +112,7 @@ impl OrionApp {
             place_cache: Default::default(),
             cruise_off_key: false,
             carrying: None,
+            wp: DMat4::IDENTITY,
             dim_select_all: None,
             dim_sel: Vec::new(),
             settings_open: false,
@@ -223,6 +226,7 @@ impl OrionApp {
     fn run_pending(&mut self, p: Pending) {
         match p {
             Pending::New => {
+                self.reset_workplane();
                 self.doc = Document::default();
                 self.doc.settings = self.prefs.new_design.clone();
                 self.path = None;
@@ -246,6 +250,7 @@ impl OrionApp {
     fn open_path(&mut self, p: PathBuf) {
         match file::load(&p) {
             Ok(doc) => {
+                self.reset_workplane();
                 self.doc = doc;
                 self.path = Some(p);
                 self.selection.clear();
@@ -349,7 +354,7 @@ impl OrionApp {
                 }
                 // Centre on the workplane, resting on it.
                 self.selection = vec![id];
-                if let Some((lo, hi)) = ops::bounds_of(&mut self.cache, &self.doc, &[id]) {
+                if let Some((lo, hi)) = self.bounds_f(&[id]) {
                     let c = (lo + hi) * 0.5;
                     self.translate_selection(DVec3::new(-c.x, -c.y, -lo.z));
                 }
@@ -367,6 +372,40 @@ impl OrionApp {
     // -----------------------------------------------------------------------
     // Edit commands
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Workplane frame helpers. Editing happens in the workplane's frame, so a
+    // face-aligned workplane makes moves, handles, sizes and "drop" work
+    // relative to that face.
+    // -----------------------------------------------------------------------
+
+    pub fn wp_inv(&self) -> DMat4 {
+        self.wp.inverse()
+    }
+
+    /// Bounds of nodes in workplane coordinates.
+    pub fn bounds_f(&mut self, ids: &[NodeId]) -> Option<(DVec3, DVec3)> {
+        let inv = self.wp_inv();
+        ops::bounds_in(&mut self.cache, &self.doc, ids, &inv)
+    }
+
+    pub fn node_bounds_f(&mut self, n: &Node) -> (DVec3, DVec3) {
+        let inv = self.wp_inv();
+        ops::node_bounds_in(&mut self.cache, n, &inv).unwrap_or_else(|| {
+            let o = (inv * n.transform.0).transform_point3(DVec3::ZERO);
+            (o, o)
+        })
+    }
+
+    /// Apply a workplane-space transform on top of the original nodes.
+    pub fn apply_f(&mut self, orig: &ops::Originals, m: DMat4, bake: bool) {
+        let w = self.wp * m * self.wp_inv();
+        ops::apply(&mut self.doc, orig, w, bake);
+    }
+
+    pub fn reset_workplane(&mut self) {
+        self.wp = DMat4::IDENTITY;
+    }
 
     /// Add a library shape with a full placement transform (e.g. standing on
     /// another shape's face).
@@ -499,24 +538,27 @@ impl OrionApp {
 
     pub fn mirror(&mut self, axis: usize) {
         let ids = self.editable_selection();
-        let Some((lo, hi)) = ops::bounds_of(&mut self.cache, &self.doc, &ids) else { return };
+        let Some((lo, hi)) = self.bounds_f(&ids) else { return };
         let mut s = DVec3::ONE;
         s[axis] = -1.0;
         let orig = ops::originals(&self.doc, &ids);
-        ops::apply(&mut self.doc, &orig, ops::scale_about((lo + hi) * 0.5, s), true);
+        self.apply_f(&orig, ops::scale_about((lo + hi) * 0.5, s), true);
     }
 
     pub fn drop_to_workplane(&mut self) {
         for id in self.editable_selection() {
             let Some(n) = self.doc.get(id).cloned() else { continue };
-            let (lo, _) = ops::node_bounds(&mut self.cache, &n);
+            let (lo, _) = self.node_bounds_f(&n);
+            let d = self.wp.transform_vector3(DVec3::new(0.0, 0.0, -lo.z));
             if let Some(n) = self.doc.get_mut(id) {
-                n.transform.0 = DMat4::from_translation(DVec3::new(0.0, 0.0, -lo.z)) * n.transform.0;
+                n.transform.0 = DMat4::from_translation(d) * n.transform.0;
             }
         }
     }
 
+    /// Move the selection by `d`, given in workplane coordinates.
     pub fn translate_selection(&mut self, d: DVec3) {
+        let d = self.wp.transform_vector3(d);
         for id in self.editable_selection() {
             if let Some(n) = self.doc.get_mut(id) {
                 n.transform.0 = DMat4::from_translation(d) * n.transform.0;
@@ -540,7 +582,7 @@ impl OrionApp {
     /// Arrow-key nudge relative to the view direction.
     fn nudge(&mut self, forward: f64, right: f64, up: f64) {
         let step = if self.doc.settings.snap > 0.0 { self.doc.settings.snap } else { 1.0 };
-        let fwd = self.camera.target - self.camera.eye();
+        let fwd = self.wp_inv().transform_vector3((self.camera.target - self.camera.eye()).as_dvec3()).as_vec3();
         // Snap the view direction to the nearest world axis.
         let f = if fwd.x.abs() > fwd.y.abs() {
             DVec3::new(fwd.x.signum() as f64, 0.0, 0.0)
@@ -674,6 +716,9 @@ impl OrionApp {
         }
         if hit(sc(plain, Key::L)) {
             self.set_tool(ctx, Tool::Align { key: None });
+        }
+        if hit(sc(plain, Key::W)) {
+            self.set_tool(ctx, Tool::Workplane);
         }
         if hit(sc(plain, Key::M)) {
             self.set_tool(ctx, Tool::Mirror);
@@ -812,6 +857,14 @@ impl OrionApp {
                         }
                         if r.clicked() {
                             self.set_tool(&ui.ctx().clone(), Tool::Mirror);
+                        }
+                        let r = icons::button(ui, Icon::Workplane, true, "Workplane (W): click a face to work on it; click empty space to reset");
+                        if self.tool == Tool::Workplane || self.wp != DMat4::IDENTITY {
+                            let col = if self.tool == Tool::Workplane { crate::viewport::ACCENT } else { Color32::from_rgb(0xf2, 0x8c, 0x28) };
+                            ui.painter().rect_stroke(r.rect, 4.0, (1.5, col), egui::StrokeKind::Inside);
+                        }
+                        if r.clicked() {
+                            self.set_tool(&ui.ctx().clone(), Tool::Workplane);
                         }
                         let r = icons::button(ui, Icon::Align, self.selection.len() >= 2, "Align (L)");
                         if matches!(self.tool, Tool::Align { .. }) {
