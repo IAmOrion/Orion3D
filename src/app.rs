@@ -570,6 +570,9 @@ impl OrionApp {
     // -----------------------------------------------------------------------
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.pending.is_some() {
+            return;
+        }
         let sc = |m: Modifiers, k: Key| KeyboardShortcut::new(m, k);
         let cmd = Modifiers::COMMAND;
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -833,30 +836,83 @@ impl OrionApp {
                     });
                 });
             });
+    }
 
-        // Unsaved-changes bar (inline, no modal dialog).
-        if let Some(p) = self.pending.clone() {
-            egui::Panel::top("pending_bar")
-                .frame(egui::Frame::new().fill(Color32::from_rgb(0xff, 0xf1, 0xc4)).inner_margin(egui::Margin::symmetric(12, 6)))
-                .show(ui, |ui| {
+    /// Unsaved-changes prompt, centred over the app with the rest dimmed.
+    fn unsaved_dialog(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.pending.clone() else { return };
+        let screen = ctx.content_rect();
+        // Dim everything and swallow clicks behind the dialog.
+        egui::Area::new(egui::Id::unique("unsaved_backdrop"))
+            .fixed_pos(screen.min)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (r, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(90));
+            });
+        let action = match p {
+            Pending::Close => "closing",
+            Pending::New => "starting a new design",
+            Pending::Open(_) => "opening another design",
+        };
+        let mut choice = None;
+        egui::Area::new(egui::Id::unique("unsaved_dialog"))
+            .fixed_pos(screen.center())
+            .pivot(egui::Align2::CENTER_CENTER)
+            .order(egui::Order::Tooltip)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(20).corner_radius(10).show(ui, |ui| {
+                    ui.set_width(380.0);
+                    ui.label(RichText::new("Save changes?").strong().size(18.0));
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "\"{}\" has unsaved changes. Do you want to save them before {action}?",
+                            self.base_name()
+                        ))
+                        .size(14.0)
+                        .color(Color32::from_gray(60)),
+                    );
+                    ui.add_space(16.0);
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{} has unsaved changes.", self.file_name()))
-                                .color(Color32::from_rgb(0x5a, 0x44, 0x00)),
-                        );
-                        if ui.button("Save").clicked() && self.save(&ctx, false) {
-                            self.pending = None;
-                            self.run_pending(p.clone());
+                        if ui.add(egui::Button::new("Don't save").min_size(vec2(96.0, 30.0))).clicked() {
+                            choice = Some(1);
                         }
-                        if ui.button("Discard changes").clicked() {
-                            self.pending = None;
-                            self.run_pending(p.clone());
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.pending = None;
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let save = egui::Button::new(RichText::new("Save").strong().color(Color32::WHITE))
+                                .fill(Color32::from_rgb(0x2b, 0x7c, 0xe9))
+                                .min_size(vec2(96.0, 30.0));
+                            if ui.add(save).clicked() {
+                                choice = Some(0);
+                            }
+                            if ui.add(egui::Button::new("Cancel").min_size(vec2(96.0, 30.0))).clicked() {
+                                choice = Some(2);
+                            }
+                        });
                     });
                 });
+            });
+        // Keyboard: Enter saves, Esc cancels.
+        if choice.is_none() {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                choice = Some(0);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                choice = Some(2);
+            }
+        }
+        match choice {
+            Some(0) => {
+                if self.save(ctx, false) {
+                    self.pending = None;
+                    self.run_pending(p);
+                }
+            }
+            Some(1) => {
+                self.pending = None;
+                self.run_pending(p);
+            }
+            Some(_) => self.pending = None,
+            None => {}
         }
     }
 
@@ -1157,6 +1213,7 @@ impl eframe::App for OrionApp {
             self.viewport(ui, frame);
         });
         self.export_panel(&ctx);
+        self.unsaved_dialog(&ctx);
         self.settings_panel(&ctx);
 
         // History: commit only when the user isn't mid-interaction.
