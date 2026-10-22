@@ -10,7 +10,7 @@ import sys, os
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-POSITION = sys.argv[1] if len(sys.argv) > 1 else "centre"
+POSITION = sys.argv[1] if len(sys.argv) > 1 else "bottom"
 TEXT = "3D"
 FONT = os.environ.get("ORION3D_LOGO_FONT", "/usr/share/fonts/opentype/inter/InterDisplay-BlackItalic.otf")
 BADGE_WIDTH = 0.62          # fraction of the icon width
